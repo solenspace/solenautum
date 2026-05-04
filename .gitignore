@@ -1,0 +1,30 @@
+# Claude Code
+.claude/settings.local.json
+
+# Node / pnpm
+node_modules/
+.next/
+.turbo/
+dist/
+*.tsbuildinfo
+
+# Python / uv
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Env
+.env
+.env.local
+.env.*.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/

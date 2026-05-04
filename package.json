@@ -1,0 +1,22 @@
+{
+  "name": "autumn",
+  "version": "0.0.0",
+  "private": true,
+  "packageManager": "pnpm@11.0.5",
+  "engines": {
+    "node": "22"
+  },
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "test": "turbo run test",
+    "typecheck": "turbo run typecheck",
+    "lint": "turbo run lint",
+    "format": "turbo run format",
+    "clean": "turbo run clean && rm -rf node_modules .turbo"
+  },
+  "devDependencies": {
+    "turbo": "^2.9.8",
+    "typescript": "^6.0.0"
+  }
+}
