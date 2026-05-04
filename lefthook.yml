@@ -1,0 +1,39 @@
+pre-commit:
+  parallel: true
+  commands:
+    block-env-files:
+      run: |
+        leaked=$(echo "{staged_files}" | tr ' ' '\n' | grep -E '(^|/)\.env($|\.[^.]*$)' | grep -v '\.env\.example$' || true)
+        if [ -n "$leaked" ]; then
+          echo "refusing to commit env files:"
+          echo "$leaked"
+          exit 1
+        fi
+    typecheck:
+      glob: "*.{ts,tsx}"
+      run: pnpm exec turbo run typecheck
+
+pre-push:
+  parallel: true
+  commands:
+    test:
+      run: pnpm exec turbo run test
+    build:
+      run: pnpm exec turbo run build
+
+commit-msg:
+  commands:
+    conventional-commits:
+      run: |
+        msg=$(head -n1 "{1}")
+        case "$msg" in
+          Merge*|Revert*|"fixup!"*|"squash!"*) exit 0 ;;
+        esac
+        pattern='^(feat|fix|chore|docs|refactor|test|build|ci|perf|style|revert)(\([a-z0-9._-]+\))?!?: .{1,72}$'
+        if ! echo "$msg" | grep -qE "$pattern"; then
+          echo "commit message must follow: <type>(<scope>): <subject>"
+          echo "  types: feat fix chore docs refactor test build ci perf style revert"
+          echo "  subject: 1-72 chars, imperative mood"
+          echo "  got: $msg"
+          exit 1
+        fi
