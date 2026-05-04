@@ -1,0 +1,80 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.4.14/schema.json",
+  "vcs": {
+    "enabled": true,
+    "clientKind": "git",
+    "useIgnoreFile": true
+  },
+  "files": {
+    "ignoreUnknown": true,
+    "includes": [
+      "apps/web/**/*.{ts,tsx,js,jsx,json,jsonc}",
+      "packages/**/*.{ts,tsx,js,jsx,json,jsonc}",
+      "*.{json,jsonc}",
+      "!**/node_modules",
+      "!**/.next",
+      "!**/.turbo",
+      "!**/dist",
+      "!**/.venv",
+      "!**/__pycache__",
+      "!**/generated"
+    ]
+  },
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 100,
+    "lineEnding": "lf"
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "recommended": true,
+      "complexity": { "recommended": true },
+      "correctness": {
+        "recommended": true,
+        "noUnusedVariables": "error",
+        "noUnusedImports": "error",
+        "useExhaustiveDependencies": "error"
+      },
+      "security": { "recommended": true },
+      "suspicious": {
+        "recommended": true,
+        "noConsole": { "level": "warn", "options": { "allow": ["error", "warn"] } }
+      },
+      "a11y": { "recommended": true },
+      "style": {
+        "recommended": true,
+        "useImportType": "error",
+        "useExportType": "error",
+        "noNonNullAssertion": "error"
+      },
+      "performance": { "recommended": true },
+      "nursery": { "recommended": false }
+    }
+  },
+  "javascript": {
+    "formatter": {
+      "quoteStyle": "double",
+      "jsxQuoteStyle": "double",
+      "trailingCommas": "all",
+      "semicolons": "always",
+      "arrowParentheses": "always"
+    }
+  },
+  "json": {
+    "formatter": {
+      "indentWidth": 2,
+      "trailingCommas": "none"
+    }
+  },
+  "assist": {
+    "enabled": true,
+    "actions": {
+      "source": {
+        "organizeImports": "on"
+      }
+    }
+  }
+}

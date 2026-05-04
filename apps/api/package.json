@@ -6,7 +6,10 @@
     "dev": "uv run uvicorn app.main:app --reload --port 8000",
     "build": "uv sync --frozen",
     "test": "uv run pytest -q",
-    "typecheck": "uv run mypy app || true",
+    "typecheck": "uv run mypy app",
+    "lint": "uv run ruff check app tests",
+    "format": "uv run ruff format app tests",
+    "format:check": "uv run ruff format --check app tests",
     "clean": "rm -rf .venv .pytest_cache .mypy_cache .ruff_cache __pycache__"
   }
 }

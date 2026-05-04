@@ -11,7 +11,7 @@ resuming a session.
 
 ## Current Goal
 
-- Implementing `specs/02-linting-and-formatting.md`.
+- Implementing `specs/03-pre-commit-and-conventional-commits.md`.
 
 ## Completed
 
@@ -47,17 +47,26 @@ resuming a session.
   "Hello Autumn", `:8000/health` returns `{"status":"ok"}`,
   `:8000/docs` lists the route. `turbo run typecheck`, `turbo run
   test`, `turbo run build` all exit 0.
+- **Spec 02 — linting-and-formatting.** Biome 2.4.14 owns JS/TS
+  lint + format + import sort at the repo root; ruff 0.15 owns
+  Python lint + format + import sort; mypy 1.20 `--strict` with the
+  `pydantic.mypy` plugin owns Python type checking. `apps/api`
+  `typecheck` script no longer ends in `|| true`. Editor integration
+  (`.vscode/settings.json`, `.vscode/extensions.json`) committed.
+  `turbo run lint && turbo run format:check && turbo run typecheck
+  && turbo run test && turbo run build` exits 0.
 
 ## In Progress
 
-- `specs/02-linting-and-formatting.md` — to begin next session.
+- `specs/03-pre-commit-and-conventional-commits.md` — to begin next
+  session.
 
 ## Next Up
 
-- Implement `specs/02-linting-and-formatting.md` (Biome + ruff +
-  mypy strict + pre-commit hooks scaffold). The remaining specs
-  follow in numbered order; each spec's `Done when` checklist
-  gates progress to the next.
+- Implement `specs/03-pre-commit-and-conventional-commits.md`
+  (lefthook pre-commit / pre-push / commit-msg hooks plus the CI
+  mirror). The remaining specs follow in numbered order; each spec's
+  `Done when` checklist gates progress to the next.
 
 ## Open Questions
 
@@ -152,3 +161,15 @@ RLS policy migration and verify cross-tenant isolation test."
   the per-app `apps/web/pnpm-workspace.yaml` that the Next CNA
   template ships with a conflicting `ignoredBuiltDependencies` block.
   Next: Spec 02.
+- 2026-05-04: Spec 02 shipped. Three deviations from the spec text,
+  each with reason: (1) Biome 2.4.14 deprecated
+  `experimentalScannerIgnores` — migrated those ignores to negated
+  `files.includes` patterns (`!**/generated`, etc.). (2) The spec's
+  `.vscode/extensions.json` listed `esbenp.prettier-vscode` in both
+  `recommendations` and `unwantedRecommendations`; obvious copy-
+  paste typo, removed from `recommendations`. (3) Spec 01 placed
+  `pytest` in `[project.optional-dependencies] dev`, but
+  `uv add --dev` writes to `[dependency-groups] dev`, and `uv sync`
+  prefers the latter — pytest got dropped from the venv on first
+  sync. Consolidated all dev deps into `[dependency-groups] dev`
+  (modern PEP 735 pattern). Next: Spec 03.

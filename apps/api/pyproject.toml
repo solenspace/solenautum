@@ -8,11 +8,6 @@ dependencies = [
   "uvicorn[standard]>=0.32"
 ]
 
-[project.optional-dependencies]
-dev = [
-  "pytest>=8"
-]
-
 [tool.uv]
 package = true
 
@@ -23,3 +18,69 @@ module-root = ""
 [build-system]
 requires = ["uv_build>=0.11.8,<0.12.0"]
 build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.20.2",
+    "pytest>=8",
+    "ruff>=0.15.12",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["app", "tests"]
+
+[tool.ruff.lint]
+select = [
+  "E",     # pycodestyle errors
+  "F",     # pyflakes
+  "I",     # isort
+  "B",     # bugbear
+  "C4",    # comprehensions
+  "UP",    # pyupgrade
+  "N",     # pep8-naming
+  "ASYNC", # async correctness
+  "S",     # bandit (security)
+  "ARG",   # unused arguments
+  "PT",    # pytest style
+  "SIM",   # flake8-simplify
+  "RUF",   # ruff-specific
+]
+ignore = [
+  "E501",  # line length (formatter handles)
+  "S101",  # assert used (fine in tests)
+  "B008",  # function calls in defaults (FastAPI Depends pattern)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "ARG", "PT011"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+combine-as-imports = true
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+docstring-code-format = true
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]
+warn_unreachable = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+disallow_any_unimported = true
+no_implicit_reexport = true
+exclude = ["build/", "dist/", "\\.venv/", "__pycache__/"]
+
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+disallow_untyped_defs = false
+
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
+warn_required_dynamic_aliases = true
