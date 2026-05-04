@@ -1,0 +1,12 @@
+{
+  "name": "@autumn/api",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "uv run uvicorn app.main:app --reload --port 8000",
+    "build": "uv sync --frozen",
+    "test": "uv run pytest -q",
+    "typecheck": "uv run mypy app || true",
+    "clean": "rm -rf .venv .pytest_cache .mypy_cache .ruff_cache __pycache__"
+  }
+}
