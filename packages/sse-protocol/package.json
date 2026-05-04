@@ -3,5 +3,10 @@
   "version": "0.0.0",
   "private": true,
   "main": "./generated/index.ts",
-  "types": "./generated/index.ts"
+  "types": "./generated/index.ts",
+  "scripts": {
+    "lint": "biome lint .",
+    "format": "biome format --write .",
+    "format:check": "biome format ."
+  }
 }

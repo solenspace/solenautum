@@ -19,10 +19,24 @@
       "outputs": []
     },
     "lint": {
-      "outputs": []
+      "outputs": [],
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "biome.json",
+        "pyproject.toml",
+        "**/*.{ts,tsx,js,jsx,json,jsonc,py}"
+      ]
     },
     "format": {
       "cache": false
+    },
+    "format:check": {
+      "outputs": [],
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "biome.json",
+        "pyproject.toml"
+      ]
     },
     "clean": {
       "cache": false
