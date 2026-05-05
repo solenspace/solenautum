@@ -46,6 +46,21 @@ class Settings(BaseSettings):
         default=None, alias="CLERK_WEBHOOK_SIGNING_SECRET"
     )
 
+    # LLM providers. Optional so the api boots without keys; the chain raises
+    # at first call. The provider chain switches OpenRouter -> Groq on 429/5xx
+    # only (invariant 12).
+    openrouter_api_key: str | None = Field(default=None, alias="OPENROUTER_API_KEY")
+    groq_api_key: str | None = Field(default=None, alias="GROQ_API_KEY")
+
+    # Langfuse. Optional so dev/CI runs without observability; the client is
+    # constructed with `enabled=False` when keys are missing so spans are no-ops.
+    langfuse_public_key: str | None = Field(default=None, alias="LANGFUSE_PUBLIC_KEY")
+    langfuse_secret_key: str | None = Field(default=None, alias="LANGFUSE_SECRET_KEY")
+    langfuse_host: str = Field(
+        default="https://cloud.langfuse.com",
+        alias="LANGFUSE_HOST",
+    )
+
     @property
     def allowlist_patterns(self) -> tuple[str, ...]:
         if not self.autumn_url_allowlist:

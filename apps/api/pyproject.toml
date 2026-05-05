@@ -9,10 +9,14 @@ dependencies = [
   "autumn-sse-protocol",
   "boto3>=1.43.3",
   "clerk-backend-api>=5.0.6",
+  "crawl4ai>=0.8.6",
   "fastapi>=0.115",
   "greenlet>=3.5.0",
   "httpx>=0.28.1",
+  "langfuse>=2.60.10",
+  "pydantic-ai>=0.5",
   "pydantic-settings>=2.14.0",
+  "scrapling>=0.2.99",
   "slowapi>=0.1.9",
   "sqlmodel>=0.0.38",
   "svix>=1.92.2",
@@ -99,6 +103,22 @@ exclude = ["build/", "dist/", "\\.venv/", "__pycache__/"]
 [[tool.mypy.overrides]]
 module = ["tests.*"]
 disallow_untyped_defs = false
+
+# Third-party deps without bundled stubs / `py.typed` markers. The strict
+# `disallow_any_unimported = true` rule above would otherwise reject every
+# call site that imports from these packages.
+[[tool.mypy.overrides]]
+module = [
+  "autumn_sse_protocol",
+  "autumn_sse_protocol.*",
+  "crawl4ai",
+  "crawl4ai.*",
+  "langfuse",
+  "langfuse.*",
+  "scrapling",
+  "scrapling.*",
+]
+ignore_missing_imports = true
 
 [tool.pydantic-mypy]
 init_forbid_extra = true
