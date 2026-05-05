@@ -2,11 +2,15 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, Header, HTTPException, Query, Request, status
+from fastapi.responses import StreamingResponse
 from svix.webhooks import Webhook, WebhookVerificationError
 
 from app.config import settings
 from app.persistence.repository import UserRepository
+from app.runner import run_url_mission
+from app.security import RequireUser, limiter
+from app.sse import emitter
 
 router = APIRouter()
 _users = UserRepository()
@@ -69,3 +73,30 @@ async def clerk_webhook(request: Request) -> None:
         if not isinstance(user_id, str):
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "missing user id on deletion")
         await _users.delete(user_id=user_id)
+
+
+@router.get("/run-mission")
+@limiter.limit("60/minute")
+async def run_mission(
+    request: Request,  # noqa: ARG001 — slowapi keys off the `request` parameter
+    user: RequireUser,
+    url: str = Query(..., min_length=1, max_length=2048),
+    last_event_id: int | None = Header(default=None, alias="Last-Event-ID"),
+) -> StreamingResponse:
+    """Single-task mission entry point. Awaits the mission inline (Spec 07
+    single-task missions are sub-second to a few seconds) and then streams the
+    SSE projection. Spec 10 separates start from streaming so an N-URL mission
+    can begin streaming while later tasks queue.
+    """
+    mission_id = await run_url_mission(user=user, url=url)
+
+    async def _gen() -> Any:
+        async with emitter.stream(mission_id, last_event_id=last_event_id) as iterator:
+            async for chunk in iterator:
+                yield chunk
+
+    return StreamingResponse(
+        _gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
