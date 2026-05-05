@@ -11,7 +11,7 @@ resuming a session.
 
 ## Current Goal
 
-- Implementing `specs/05-postgres-and-rls-foundation.md`.
+- Implementing `specs/06-sse-protocol-and-streaming.md`.
 
 ## Completed
 
@@ -94,17 +94,40 @@ resuming a session.
   glob-subdomain. `apps/api/app/config.py` added to the protected
   list. `turbo run lint && turbo run typecheck && turbo run test`
   exits 0.
+- **Spec 05 — persistence-layer.** sqlmodel/asyncpg/alembic/boto3/svix
+  added. `apps/api/app/persistence/{models,db,repository,blob}.py`
+  ship the four-table schema (users, missions, tasks, saved_selectors)
+  with `ondelete=CASCADE` from mission down to task, lowercase
+  Postgres enums (`mission_mode`, `mission_status`, `task_tier`,
+  `task_status` via `values_callable`), and a unique covering index
+  on `(domain, purpose)`. `db.py::transaction()` reads the
+  `_current_user` ContextVar from `security.py` and binds
+  `SET LOCAL app.user_id` per transaction; `expire_on_commit=False`
+  keeps returned ORM objects readable after commit. `BlobStore` ABC +
+  `R2BlobStore` (boto3 sync, fail-fast on missing creds) +
+  `LocalFsBlobStore` (default for local), gzip + 10 MB raw
+  truncation. Initial alembic migration enables and FORCEs RLS on
+  missions and tasks with `missions_owner` and `tasks_owner` policies
+  keyed on `current_setting('app.user_id', true)`; downgrade drops
+  policies → indexes → tables → enum types in dependency order.
+  `apps/api/app/routes.py` exposes `POST /webhooks/clerk` (svix
+  verify, 503 if secret unset, no JWT, no rate limit, naturally
+  idempotent) syncing `user.created`/`user.updated`/`user.deleted`
+  into the `users` table via `UserRepository`. Three test modules
+  (3 blob tests pass, 3 repository + 3 webhook tests skipif env
+  vars unset). `turbo run lint format:check typecheck test` exits 0.
 
 ## In Progress
 
-- `specs/05-postgres-and-rls-foundation.md` — to begin next session.
+- `specs/06-sse-protocol-and-streaming.md` — to begin next session.
 
 ## Next Up
 
-- Implement `specs/05-postgres-and-rls-foundation.md` (Neon Postgres
-  + alembic + RLS policies + `users` sync via Clerk webhook). The
-  remaining specs follow in numbered order; each spec's `Done when`
-  checklist gates progress to the next.
+- Implement `specs/06-sse-protocol-and-streaming.md`
+  (`packages/sse-protocol` JSON Schema + codegen, single-queue per
+  mission, ring buffer, `Last-Event-ID` resume). The remaining specs
+  follow in numbered order; each spec's `Done when` checklist gates
+  progress to the next.
 
 ## Open Questions
 
@@ -131,6 +154,12 @@ resuming a session.
    per deployment, not per user. Cross-user reuse is faster but
    leaks information about scraping patterns. Revisit at scale or
    if a B2B customer requests isolation.
+6. **`SelectorRepository.upsert` SELECT-then-INSERT race.** Two
+   concurrent calls on the same `(domain, purpose)` can both miss
+   the SELECT and both attempt INSERT, hitting the unique index.
+   Spec 13 (adaptive selectors) replaces with `INSERT ... ON CONFLICT
+   DO UPDATE` to close the window. No-op until then because Spec 05
+   ships zero concurrent selector writers.
 
 ## Architecture Decisions
 
@@ -292,3 +321,67 @@ RLS policy migration and verify cross-tenant isolation test."
   `AUTUMN_URL_ALLOWLIST` (comma-separated, e.g.
   `example.com,*.docs.example.com`; unset = no filter). Next:
   Spec 05.
+- 2026-05-04: Spec 05 shipped. Twelve deviations / decisions worth
+  recording: (1) **No `.env.example`** — same project policy as
+  Spec 04; the eight new env-var entries (DATABASE_URL,
+  DATABASE_URL_UNPOOLED, BLOB_STORE_BACKEND, R2_ACCOUNT_ID,
+  R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET,
+  CLERK_WEBHOOK_SIGNING_SECRET) were appended (commented) to the
+  gitignored `apps/api/.env` and the contract is documented here.
+  All eight fields are `Optional` in `app/config.py` so the app
+  boots without them; consumers fail-fast at first use
+  (`db.py::_get_engine` raises if `DATABASE_URL` unset;
+  `R2BlobStore.__init__` raises if any R2 cred missing; the
+  webhook route returns 503 if the signing secret is unset).
+  (2) **Cascade FKs via `sa_column=Column(...)`** — sqlmodel's
+  `foreign_key=` shorthand can't express `ondelete="CASCADE"`,
+  required by the architecture for mission→task. Used the explicit
+  `Column(..., ForeignKey("...", ondelete="CASCADE"))` form on
+  `Mission.user_id` and `Task.mission_id`;
+  `Task.selector_cache_id` keeps the shorthand (NO ACTION on a
+  nullable cache pointer). (3) **`AsyncSession` consolidated** to
+  `sqlmodel.ext.asyncio.session.AsyncSession` everywhere (the spec
+  text mixed it with `sqlalchemy.ext.asyncio.AsyncSession`); the
+  sqlmodel subclass adds `.exec()` for typed scalar handling, used
+  consistently in repository methods. (4) **Postgres enum members
+  needed `values_callable`** — without it, `sa.Enum(MyStrEnum, ...)`
+  defaults to using Python member *names* (uppercase like
+  `'PENDING'`), which mismatches both the StrEnum's `.value`
+  (`'pending'`) and the `server_default='pending'` we pass.
+  Added `_enum_values()` helper in `models.py` and applied to all
+  four enum columns. (5) **`boto3-stubs[s3]` dev dep added** —
+  required because `disallow_any_unimported = true` would otherwise
+  reject every boto3 call site. (6) **`greenlet` prod dep added** —
+  SQLAlchemy 2.x async needs it as an explicit transitive; uv didn't
+  pull it in automatically. (7) **No `@limiter.limit` on the
+  webhook route** — slowapi's per-user limiter falls back to remote
+  IP for unauthenticated traffic, which would block Clerk's retry
+  storms on a shared egress IP. Trust the Svix signature as the
+  ceiling. (8) **`get_blob_store()` `@lru_cache`d** — single boto3
+  client per process when R2 is selected. (9) **No `conftest.py`
+  for the persistence tests** — module-level
+  `pytestmark = pytest.mark.skipif(...)` on `DATABASE_URL` /
+  `CLERK_WEBHOOK_SIGNING_SECRET` skips repository + webhook tests
+  cleanly without restructuring `tests/`. (10) **Spec test stub
+  completed** — `test_task_inherits_rls_via_mission` re-fetches the
+  task as user_a and asserts `status == Status.PENDING`, proving
+  user_b's update was hidden by RLS, not applied. (11) **Auto-gen
+  cleanups in the migration file** — autogenerate emits
+  `sqlmodel.sql.sqltypes.AutoString` (unimported) and references
+  `Text()` (also unimported); rewrote with `sa.String`/`sa.Text` and
+  modernized typing (`from __future__ import annotations`,
+  `str | None`). Dropped the redundant `ix_saved_selectors_domain`
+  and `ix_saved_selectors_purpose` indexes — the unique covering
+  index on `(domain, purpose)` already serves left-prefix lookups on
+  `domain`. (12) **Migration uses `DATABASE_URL_UNPOOLED`** — Neon's
+  PgBouncer in transaction mode rejects the session-level features
+  alembic relies on; `alembic/env.py` raises a clear
+  `RuntimeError` if it's unset. **Pooler GUC verification deferred**
+  — no Neon dev branch is configured in this session; the RLS
+  pooler check (architecture caveat) needs to be run when a real
+  branch comes online. **Env contract delta (apps/api/.env)** —
+  optional: `DATABASE_URL`, `DATABASE_URL_UNPOOLED` (Neon Postgres,
+  `postgresql+asyncpg://...?sslmode=require`), `BLOB_STORE_BACKEND`
+  (`r2`|`local`, default `local`), `R2_ACCOUNT_ID`,
+  `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET`,
+  `CLERK_WEBHOOK_SIGNING_SECRET`. Next: Spec 06.
