@@ -5,11 +5,13 @@ from fastapi.responses import JSONResponse
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
+from app.routes import router as api_router
 from app.security import RequireUser, limiter
 
 app = FastAPI(title="Autumn API")
 app.state.limiter = limiter
 app.add_middleware(SlowAPIMiddleware)
+app.include_router(api_router)
 
 
 @app.exception_handler(RateLimitExceeded)
