@@ -1,0 +1,212 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://autumn.local/sse/event.json",
+  "title": "SseEvent",
+  "description": "Multiplexed SSE event for Autumn missions.",
+  "type": "object",
+  "discriminator": { "propertyName": "type" },
+  "oneOf": [
+    { "$ref": "#/$defs/Token" },
+    { "$ref": "#/$defs/ToolStart" },
+    { "$ref": "#/$defs/ToolEnd" },
+    { "$ref": "#/$defs/TaskStart" },
+    { "$ref": "#/$defs/TaskEnd" },
+    { "$ref": "#/$defs/UrlDiscovered" },
+    { "$ref": "#/$defs/SelectorRecovered" },
+    { "$ref": "#/$defs/Done" },
+    { "$ref": "#/$defs/SseError" }
+  ],
+  "$defs": {
+    "BaseEvent": {
+      "type": "object",
+      "required": ["mission_id", "seq"],
+      "properties": {
+        "mission_id": { "type": "string", "format": "uuid" },
+        "task_id": { "type": "string", "format": "uuid" },
+        "seq": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "Token": {
+      "allOf": [
+        { "$ref": "#/$defs/BaseEvent" },
+        {
+          "type": "object",
+          "required": ["type", "content", "task_id"],
+          "properties": {
+            "type": { "const": "token" },
+            "content": { "type": "string", "description": "Streamed text fragment" }
+          }
+        }
+      ]
+    },
+    "ToolStart": {
+      "allOf": [
+        { "$ref": "#/$defs/BaseEvent" },
+        {
+          "type": "object",
+          "required": ["type", "content", "task_id"],
+          "properties": {
+            "type": { "const": "tool_start" },
+            "content": {
+              "type": "object",
+              "required": ["tool_name", "args"],
+              "properties": {
+                "tool_name": { "type": "string" },
+                "args": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "ToolEnd": {
+      "allOf": [
+        { "$ref": "#/$defs/BaseEvent" },
+        {
+          "type": "object",
+          "required": ["type", "content", "task_id"],
+          "properties": {
+            "type": { "const": "tool_end" },
+            "content": {
+              "type": "object",
+              "required": ["tool_name", "duration_ms", "ok"],
+              "properties": {
+                "tool_name": { "type": "string" },
+                "duration_ms": { "type": "integer", "minimum": 0 },
+                "ok": { "type": "boolean" },
+                "summary": { "type": "string" }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "TaskStart": {
+      "allOf": [
+        { "$ref": "#/$defs/BaseEvent" },
+        {
+          "type": "object",
+          "required": ["type", "content", "task_id"],
+          "properties": {
+            "type": { "const": "task_start" },
+            "content": {
+              "type": "object",
+              "required": ["url", "tier"],
+              "properties": {
+                "url": { "type": "string", "format": "uri" },
+                "tier": { "enum": ["http", "stealth", "dynamic"] }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "TaskEnd": {
+      "allOf": [
+        { "$ref": "#/$defs/BaseEvent" },
+        {
+          "type": "object",
+          "required": ["type", "content", "task_id"],
+          "properties": {
+            "type": { "const": "task_end" },
+            "content": {
+              "type": "object",
+              "required": ["status"],
+              "properties": {
+                "status": { "enum": ["succeeded", "failed", "cancelled"] },
+                "latency_ms": { "type": "integer", "minimum": 0 },
+                "snapshot_key": { "type": "string" },
+                "preview": { "type": "string", "description": "First N chars of parsed markdown" }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "UrlDiscovered": {
+      "allOf": [
+        { "$ref": "#/$defs/BaseEvent" },
+        {
+          "type": "object",
+          "required": ["type", "content"],
+          "properties": {
+            "type": { "const": "url_discovered" },
+            "content": {
+              "type": "object",
+              "required": ["url", "source"],
+              "properties": {
+                "url": { "type": "string", "format": "uri" },
+                "source": { "type": "string", "description": "Provider name (e.g. tavily)" },
+                "score": { "type": "number", "minimum": 0, "maximum": 1 }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "SelectorRecovered": {
+      "allOf": [
+        { "$ref": "#/$defs/BaseEvent" },
+        {
+          "type": "object",
+          "required": ["type", "content", "task_id"],
+          "properties": {
+            "type": { "const": "selector_recovered" },
+            "content": {
+              "type": "object",
+              "required": ["domain", "purpose", "hit_count"],
+              "properties": {
+                "domain": { "type": "string" },
+                "purpose": { "type": "string" },
+                "hit_count": { "type": "integer", "minimum": 1 }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "Done": {
+      "allOf": [
+        { "$ref": "#/$defs/BaseEvent" },
+        {
+          "type": "object",
+          "required": ["type", "content"],
+          "properties": {
+            "type": { "const": "done" },
+            "content": {
+              "type": "object",
+              "required": ["mission_status"],
+              "properties": {
+                "mission_status": { "enum": ["succeeded", "failed", "cancelled"] },
+                "cost_cents": { "type": "integer", "minimum": 0 }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "SseError": {
+      "allOf": [
+        { "$ref": "#/$defs/BaseEvent" },
+        {
+          "type": "object",
+          "required": ["type", "content"],
+          "properties": {
+            "type": { "const": "error" },
+            "content": {
+              "type": "object",
+              "required": ["code", "message"],
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "description": "Machine code, e.g. resume_lost, ssrf_blocked, robots_disallowed, site_not_supported"
+                },
+                "message": { "type": "string" }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

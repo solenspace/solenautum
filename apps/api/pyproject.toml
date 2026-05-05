@@ -6,6 +6,7 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
   "alembic>=1.18.4",
   "asyncpg>=0.31.0",
+  "autumn-sse-protocol",
   "boto3>=1.43.3",
   "clerk-backend-api>=5.0.6",
   "fastapi>=0.115",
@@ -20,6 +21,9 @@ dependencies = [
 
 [tool.uv]
 package = true
+
+[tool.uv.sources]
+autumn-sse-protocol = { path = "../../packages/sse-protocol/generated/python", editable = true }
 
 [tool.uv.build-backend]
 module-name = "app"
@@ -73,7 +77,7 @@ ignore = [
 "tests/**" = ["S101", "ARG", "PT011"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["app"]
+known-first-party = ["app", "autumn_sse_protocol"]
 combine-as-imports = true
 
 [tool.ruff.format]
