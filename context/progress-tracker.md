@@ -11,7 +11,7 @@ resuming a session.
 
 ## Current Goal
 
-- Implementing `specs/03-pre-commit-and-conventional-commits.md`.
+- Implementing `specs/04-clerk-auth-and-security-foundation.md`.
 
 ## Completed
 
@@ -55,18 +55,34 @@ resuming a session.
   (`.vscode/settings.json`, `.vscode/extensions.json`) committed.
   `turbo run lint && turbo run format:check && turbo run typecheck
   && turbo run test && turbo run build` exits 0.
+- **Spec 03 — git-hooks-and-commits.** Lefthook 2.1.6 + commitlint
+  20.5.3 (with `@commitlint/config-conventional` 20.5.3) installed
+  via the npm workspace. Root `prepare: lefthook install` script
+  wires `.git/hooks/{pre-commit,pre-push,commit-msg}` on every
+  `pnpm install`. `pre-commit` runs Biome (TS/JS/JSON) and ruff
+  (Python lint + format) on staged files only with `stage_fixed:
+  true`; `pre-push` runs `turbo typecheck` then `turbo test`
+  sequentially; `commit-msg` delegates to commitlint with a custom
+  `scope-enum` covering `web`, `api`, `sse-protocol`, `repo`,
+  `specs`, `context`, `claude`, `deps`. Five commitlint scenarios
+  smoke-tested via `echo … | commitlint`: bad msg, missing scope,
+  unknown scope, capital subject, valid msg — all exit codes
+  correct. Biome and ruff auto-fix-and-restage smoke-tested via
+  real commits (then reverted with `git reset --mixed`, never
+  `--hard`). `turbo run lint && turbo run format:check && turbo
+  run typecheck && turbo run test && turbo run build` exits 0.
 
 ## In Progress
 
-- `specs/03-pre-commit-and-conventional-commits.md` — to begin next
+- `specs/04-clerk-auth-and-security-foundation.md` — to begin next
   session.
 
 ## Next Up
 
-- Implement `specs/03-pre-commit-and-conventional-commits.md`
-  (lefthook pre-commit / pre-push / commit-msg hooks plus the CI
-  mirror). The remaining specs follow in numbered order; each spec's
-  `Done when` checklist gates progress to the next.
+- Implement `specs/04-clerk-auth-and-security-foundation.md` (Clerk
+  middleware + protected routes + Postgres RLS scaffolding). The
+  remaining specs follow in numbered order; each spec's `Done when`
+  checklist gates progress to the next.
 
 ## Open Questions
 
@@ -173,3 +189,26 @@ RLS policy migration and verify cross-tenant isolation test."
   prefers the latter — pytest got dropped from the venv on first
   sync. Consolidated all dev deps into `[dependency-groups] dev`
   (modern PEP 735 pattern). Next: Spec 03.
+- 2026-05-04: Spec 03 shipped. Five deviations / decisions worth
+  recording: (1) The spec file is `specs/03-git-hooks-and-commits.md`,
+  but earlier tracker entries referenced
+  `specs/03-pre-commit-and-conventional-commits.md` — fixed the
+  stale references throughout this file. (2) Kept the
+  `block-env-files` pre-commit job carried over from the bootstrap
+  `lefthook.yml`; spec doesn't include it but it's an existing
+  security feature and the spec's "three hooks" rule refers to hook
+  events (pre-commit / pre-push / commit-msg), not job count.
+  (3) Resolved versions exceed the spec's floor: lefthook 2.1.6
+  (spec asked ≥ 1.10), commitlint 20.5.3 (spec asked ≥ 19) — npm
+  registry has moved past those minor lines. (4) pnpm 11's
+  build-script gating triggered again: lefthook's npm package has
+  a postinstall that extracts the Go binary; needed
+  `allowBuilds.lefthook: true` in `pnpm-workspace.yaml` (same
+  pattern Spec 01 used for `sharp` and `unrs-resolver`). (5) During
+  smoke-testing I called `git reset --hard HEAD~1` to clean up a
+  successful smoke commit — this also wiped my unstaged
+  modifications to `lefthook.yml`/`package.json`/`pnpm-workspace.yaml`/
+  `.gitignore`, forcing a full re-do. Lesson: when undoing a
+  smoke commit that has unstaged real changes alongside it, use
+  `git reset --mixed HEAD~1` (the default), never `--hard`. Next:
+  Spec 04.

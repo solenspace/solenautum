@@ -1,7 +1,13 @@
+# Lefthook configuration — gates code quality before changes leave
+# the local machine. See specs/03-git-hooks-and-commits.md for the
+# rationale behind each hook.
+
+assert_lefthook_installed: true
+
 pre-commit:
   parallel: true
-  commands:
-    block-env-files:
+  jobs:
+    - name: block-env-files
       run: |
         leaked=$(echo "{staged_files}" | tr ' ' '\n' | grep -E '(^|/)\.env($|\.[^.]*$)' | grep -v '\.env\.example$' || true)
         if [ -n "$leaked" ]; then
@@ -9,31 +15,34 @@ pre-commit:
           echo "$leaked"
           exit 1
         fi
-    typecheck:
-      glob: "*.{ts,tsx}"
-      run: pnpm exec turbo run typecheck
+
+    - name: biome-staged
+      run: pnpm exec biome check --write --no-errors-on-unmatched --files-ignore-unknown=true {staged_files}
+      stage_fixed: true
+      glob: "*.{ts,tsx,js,jsx,json,jsonc}"
+
+    - name: ruff-lint-staged
+      root: apps/api
+      run: uv run ruff check --fix {staged_files}
+      stage_fixed: true
+      glob: "apps/api/**/*.py"
+
+    - name: ruff-format-staged
+      root: apps/api
+      run: uv run ruff format {staged_files}
+      stage_fixed: true
+      glob: "apps/api/**/*.py"
 
 pre-push:
-  parallel: true
-  commands:
-    test:
-      run: pnpm exec turbo run test
-    build:
-      run: pnpm exec turbo run build
+  parallel: false
+  jobs:
+    - name: typecheck
+      run: pnpm turbo run typecheck
+
+    - name: test
+      run: pnpm turbo run test
 
 commit-msg:
-  commands:
-    conventional-commits:
-      run: |
-        msg=$(head -n1 "{1}")
-        case "$msg" in
-          Merge*|Revert*|"fixup!"*|"squash!"*) exit 0 ;;
-        esac
-        pattern='^(feat|fix|chore|docs|refactor|test|build|ci|perf|style|revert)(\([a-z0-9._-]+\))?!?: .{1,72}$'
-        if ! echo "$msg" | grep -qE "$pattern"; then
-          echo "commit message must follow: <type>(<scope>): <subject>"
-          echo "  types: feat fix chore docs refactor test build ci perf style revert"
-          echo "  subject: 1-72 chars, imperative mood"
-          echo "  got: $msg"
-          exit 1
-        fi
+  jobs:
+    - name: commitlint
+      run: pnpm exec commitlint --edit {1}

@@ -30,3 +30,6 @@ Thumbs.db
 !.vscode/settings.json
 !.vscode/extensions.json
 .idea/
+
+# Lefthook
+.lefthook-local.yml

@@ -7,6 +7,7 @@
     "node": "22"
   },
   "scripts": {
+    "prepare": "lefthook install",
     "dev": "turbo run dev",
     "build": "turbo run build",
     "test": "turbo run test",
@@ -17,6 +18,9 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.4.14",
+    "@commitlint/cli": "20.5.3",
+    "@commitlint/config-conventional": "20.5.3",
+    "lefthook": "2.1.6",
     "turbo": "^2.9.8",
     "typescript": "^6.0.0"
   }
