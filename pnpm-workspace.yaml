@@ -3,6 +3,7 @@ packages:
   - "packages/*"
 
 allowBuilds:
+  '@clerk/shared': true
   lefthook: true
   sharp: true
   unrs-resolver: true
