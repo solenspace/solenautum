@@ -61,6 +61,8 @@ Do not modify the following without explicit instruction:
 - `apps/api/app/security.py` — SSRF guard, JWT verification, rate
   limiter, robots.txt logic. Changes here require explicit approval
   because the file is load-bearing for invariants 1, 10, 11.
+- `apps/api/app/config.py` — pydantic-settings env loader. Adding a
+  new env var is the only reason to edit; deliberate edits only.
 - `alembic/versions/*` after they have been merged — never edit a
   past migration; write a new one.
 

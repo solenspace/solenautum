@@ -11,7 +11,7 @@ resuming a session.
 
 ## Current Goal
 
-- Implementing `specs/04-clerk-auth-and-security-foundation.md`.
+- Implementing `specs/05-postgres-and-rls-foundation.md`.
 
 ## Completed
 
@@ -71,16 +71,38 @@ resuming a session.
   real commits (then reverted with `git reset --mixed`, never
   `--hard`). `turbo run lint && turbo run format:check && turbo
   run typecheck && turbo run test && turbo run build` exits 0.
+- **Spec 04 — clerk-auth-and-security-foundation.** `@clerk/nextjs`
+  ^7.3.0 wired in `apps/web` via Next 16's `proxy.ts`; `(auth)`
+  route group ships sign-in / sign-up under
+  `[[...sign-in]]` / `[[...sign-up]]`; root layout wraps
+  `<ClerkProvider>` while keeping the Geist font variables; the
+  `/missions` placeholder server component calls
+  `auth()` and redirects to `/sign-in` when unauthenticated. On the
+  api: `apps/api/app/config.py` (pydantic-settings v2 env loader,
+  required `CLERK_SECRET_KEY`/`CLERK_PUBLISHABLE_KEY`, optional
+  `AUTUMN_USER_AGENT`/`AUTUMN_URL_ALLOWLIST`) and
+  `apps/api/app/security.py` (load-bearing protected file: SSRF
+  guard `assert_safe_url`, async robots.txt honor
+  `assert_robots_allows`, contextvar-based `CurrentUser` binding,
+  `require_user` Clerk JWT dependency, slowapi `Limiter`
+  60/min + 1000/day keyed on `user_id`-or-remote). `app/main.py`
+  installs `SlowAPIMiddleware`, registers a `RateLimitExceeded`
+  handler, and exposes `/me` as the auth+rate-limit smoke endpoint.
+  Five pytest files (18 tests total) cover SSRF block list, scheme
+  rejection, public-https allow, JWT 401 negative paths, rate-limit
+  threshold, robots override bypass, and allow-list none / blocked /
+  glob-subdomain. `apps/api/app/config.py` added to the protected
+  list. `turbo run lint && turbo run typecheck && turbo run test`
+  exits 0.
 
 ## In Progress
 
-- `specs/04-clerk-auth-and-security-foundation.md` — to begin next
-  session.
+- `specs/05-postgres-and-rls-foundation.md` — to begin next session.
 
 ## Next Up
 
-- Implement `specs/04-clerk-auth-and-security-foundation.md` (Clerk
-  middleware + protected routes + Postgres RLS scaffolding). The
+- Implement `specs/05-postgres-and-rls-foundation.md` (Neon Postgres
+  + alembic + RLS policies + `users` sync via Clerk webhook). The
   remaining specs follow in numbered order; each spec's `Done when`
   checklist gates progress to the next.
 
@@ -212,3 +234,61 @@ RLS policy migration and verify cross-tenant isolation test."
   smoke commit that has unstaged real changes alongside it, use
   `git reset --mixed HEAD~1` (the default), never `--hard`. Next:
   Spec 04.
+- 2026-05-04: Spec 04 shipped. Six deviations / notes worth
+  recording: (1) **clerk-backend-api 5.x SDK shape** — the spec
+  imported `authenticate_request` and `AuthenticateRequestOptions`
+  from `clerk_backend_api.jwks_helpers` and instantiated a
+  `Clerk(bearer_auth=...)` client. In 5.0.6 there is no
+  `jwks_helpers` module and no `Clerk` instance is needed for auth;
+  the canonical paths are
+  `clerk_backend_api.security.authenticaterequest.authenticate_request_async`
+  and `clerk_backend_api.security.types.AuthenticateRequestOptions`,
+  with the secret key passed via `AuthenticateRequestOptions(secret_key=...)`.
+  Imported from those canonical paths because the package's
+  `__init__.py` re-exports through `from .sdk import *` /
+  `from .models import *` without `__all__`, which mypy
+  `no_implicit_reexport=True` rejects. Also switched to the async
+  variant so JWKS fetch never blocks the event loop. Starlette's
+  `Request` already satisfies the SDK's `Requestish` Protocol
+  (just needs `.headers`), so no httpx-Request adaptor is required.
+  (2) **mypy strict trimmed two `# type: ignore` lines** — the
+  pydantic plugin handled `Settings()` env-driven init without the
+  `call-arg` ignore; the unused-ignore check then forced removal.
+  Kept the two `# type: ignore[attr-defined]` on
+  `RobotFileParser.allow_all` since stdlib typeshed still doesn't
+  expose that attribute. (3) **slowapi/FastAPI handler signatures
+  trip ARG001** — `_rate_limit_handler` and `me` both take a
+  `request: Request` parameter that the body never reads, but it's
+  required by FastAPI's exception-handler contract and slowapi's
+  decorator (slowapi keys off the literal parameter name `request`).
+  Annotated both with inline `# noqa: ARG001` carrying the reason
+  rather than weakening the global ruleset. (4) **DNS in
+  `test_allowlist`** — the spec test `assert_safe_url("https://api.example.com/")`
+  runs the SSRF guard before the allow-list check, and
+  `api.example.com` is `NXDOMAIN` on most networks (including this
+  one), so the guard short-circuits with `dns resolution failed`
+  before the allow-list ever runs. Monkeypatched
+  `app.security.socket.getaddrinfo` to return a public-IP tuple in
+  all three allow-list tests so the unit suite is hermetic.
+  (5) **No `.env.example` files** — per direct user instruction,
+  we shipped only the gitignored `.env.local` (web) and `.env`
+  (api). The env contract is captured below; new contributors can
+  rerun `clerk env pull --file apps/web/.env.local` (CLI is linked
+  to app `app_3DHhPb5VEyKCiwCE8XKeIAFfyO1`, instance
+  `ins_3DHhPhiA1hlkNDFZygT2n4hFwhH`, "autumn") to bootstrap.
+  (6) **pnpm build-script gating fired again** — `@clerk/shared`
+  needed `allowBuilds: { '@clerk/shared': true }` in
+  `pnpm-workspace.yaml` (same pattern as `sharp`, `unrs-resolver`,
+  `lefthook`). pnpm pre-seeded the entry with placeholder
+  `"set this to true or false"` on first install; flipped to
+  `true`. **Env contract** — web `.env.local`:
+  `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, `CLERK_SECRET_KEY`,
+  `NEXT_PUBLIC_CLERK_SIGN_IN_URL=/sign-in`,
+  `NEXT_PUBLIC_CLERK_SIGN_UP_URL=/sign-up`,
+  `NEXT_PUBLIC_CLERK_SIGN_IN_FALLBACK_REDIRECT_URL=/missions`,
+  `NEXT_PUBLIC_CLERK_SIGN_UP_FALLBACK_REDIRECT_URL=/missions`. api
+  `.env`: `CLERK_SECRET_KEY`, `CLERK_PUBLISHABLE_KEY`, optional
+  `AUTUMN_USER_AGENT` (defaults to AutumnBot/0.1), optional
+  `AUTUMN_URL_ALLOWLIST` (comma-separated, e.g.
+  `example.com,*.docs.example.com`; unset = no filter). Next:
+  Spec 05.
