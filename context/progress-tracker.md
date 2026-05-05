@@ -335,6 +335,38 @@ resuming a session.
    Spec 13 (adaptive selectors) replaces with `INSERT ... ON CONFLICT
    DO UPDATE` to close the window. No-op until then because Spec 05
    ships zero concurrent selector writers.
+7. **Spec 10 must close `runner._spawn_detached` invariant-3
+   deviation.** `apps/api/app/runner.py::_spawn_detached` uses
+   `asyncio.create_task` outside a TaskGroup with a `# TODO(spec-10)`
+   marker. The detached task is held alive by `_inflight_tasks` set
+   + `add_done_callback(discard)` to avoid GC, but ownership is not
+   structured. Spec 10 replaces with `TaskGroup.create_task` and
+   call sites stay unchanged. The `scrape-pipeline-doctor` review of
+   Spec 10 fails until this lands.
+8. **Spec 08 verification deferred to human reviewer.** Two
+   verification items in `specs/08-web-shell-and-stream-consumer.md`
+   require a real Clerk dev instance + browser run and are not
+   agent-executable: (a) Lighthouse / axe accessibility pass on
+   `/missions`, (b) live 10-second mission against
+   `https://example.com/` rendering the three-tier slide-over end
+   to end, plus the manual real-network reconnect test (kill network
+   mid-stream → `state.reconnecting` flips and recovers). All
+   code-level gates (`turbo run lint format:check typecheck test
+   build`, `fsd-architect`, `i18n-keeper`, `sse-streaming-reviewer`,
+   `simplify`) pass.
+9. **Spec 08 SSE multi-consumer caveat (deferred to Spec 11).** A
+   single per-mission queue means a tab reload that opens a second
+   `emitter.stream(mission_id, ...)` while the first is still draining
+   will steal events from the first via the `get_nowait()` drain in
+   `apps/api/app/sse.py`. Spec 08 ships single-consumer-per-tab in
+   practice; Spec 11's multi-lane stack revisits with a fan-out queue
+   if the reload race becomes user-visible.
+10. **Spec 08 client-side events array unbounded (deferred to Spec
+    11).** `use-mission-stream.ts` appends to `events` without a cap;
+    a long mission (>1000 tokens) eventually scales O(n) on each
+    append. Spec 11 multi-lane case will need a per-lane cap (e.g.
+    last 1000) plus a `truncated_count` for the older-events
+    indicator.
 
 ## Architecture Decisions
 
@@ -692,3 +724,95 @@ RLS policy migration and verify cross-tenant isolation test."
   turbo run lint format:check typecheck test build` exits 0; pytest
   reports 41 passed, 8 skipped (all 8 are `DATABASE_URL`-gated, same
   pattern as Spec 05). Next: Spec 08.
+- 2026-05-05: Spec 08 shipped. Twelve deviations / decisions worth
+  recording: (1) **Spec filename and tracker name out of sync.**
+  Tracker referenced `specs/08-mission-form-and-stream-ui.md` but the
+  actual spec file is `specs/08-web-shell-and-stream-consumer.md`.
+  Updated tracker references throughout. (2) **shadcn 4 / Base UI
+  primitives, not Radix.** Spec assumed older shadcn (`new-york`
+  style + Radix); the current CLI ships `base-nova` + `@base-ui/react`
+  primitives. Base UI's `Dialog`/`Popover` are API-compatible with
+  the spec's `open`/`onOpenChange` patterns, so widgets render
+  identically. `--style="new-york"` flag is no longer accepted; used
+  `npx shadcn@latest init -d -y --no-monorepo` (defaults: next
+  template, base-nova preset). (3) **`pnpm dlx shadcn` exited nonzero
+  on `ERR_PNPM_IGNORED_BUILDS msw@2.14.3`** — added `msw: true` to
+  `pnpm-workspace.yaml` `allowBuilds` and switched to `npx`.
+  Pattern continues for build-script gating (`sharp`, `unrs-resolver`,
+  `lefthook`, `@clerk/shared`, `esbuild` already present).
+  (4) **shadcn aliases moved.** CLI generated `lib/utils.ts`; moved
+  to `shared/utils/cn.ts` and rewrote `components.json` aliases:
+  `utils → @/shared/utils/cn`, `lib → @/shared/utils`,
+  `hooks → @/shared/hooks`. The CLI's `--add` ran cleanly against the
+  rewired aliases (verified via `shared/hooks/use-mobile.ts`). (5)
+  **Tailwind 4 globals.css.** CLI initial output uses `oklch()` and
+  ships chart/sidebar tokens. Replaced with hex values from
+  `context/ui-context.md` bone+narrow-black palette for both modes
+  (`--background`, `--foreground`, `--primary`, `--ring`,
+  `--destructive`, `--card`, `--popover`, `--accent`, `--muted`,
+  `--state-success`, `--state-error`, full sidebar quartet) plus
+  `--radius: 0.375rem`. Imports kept: `@import "tailwindcss"`,
+  `@import "tw-animate-css"`, `@import "shadcn/tailwind.css"`,
+  `@custom-variant dark (&:is(.dark *))`, `@theme inline { ... }`,
+  `@layer base`. (6) **Vitest 3 + plugin-react 4 alignment.**
+  `@vitejs/plugin-react@6` is ESM-only and requires Vite 6 peers;
+  Vitest 2 ships Vite 5. Pinned to `vitest@^3` + `@vitejs/plugin-
+  react@4`. Renamed `vitest.config.ts` → `vitest.config.mts` (ESM
+  loader) and same for setup. `cssVariables: true` `outline-hidden`
+  Tailwind 4 classes work via shadcn's variants. (7) **jsdom 29
+  localStorage shim.** `vitest.setup.mts` polyfills a Map-backed
+  `Storage` over `window.localStorage` because jsdom 29 ships an
+  opaque proxy where `getItem`/`setItem`/`clear` are not real
+  methods. Without the shim, `useMissionStream`'s try/catch swallows
+  silently in production but tests fail loudly. (8) **i18n primitive
+  bootstrapped this spec.** Spec assumed it existed; codebase had
+  nothing under `apps/web/shared/i18n/`. Built the minimum that
+  satisfies `code-standards.md`: typed `EN` table for `common`,
+  `mission`, `validation` with all 24+ keys; pure
+  `translate(namespace, key, params?)` with `{name}` interpolation +
+  plural lookup; `I18nProvider` + `useT` (single English locale
+  today, signature stable for future locales); `I18nTestWrapper`
+  for Vitest. (9) **Runner refactor preserves the existing
+  `/run-mission?url=...` route test.** Split `run_url_mission` into
+  `_create_mission_and_task` + `_execute_url_mission` +
+  `_spawn_detached`; kept `run_url_mission` as a thin shim that
+  awaits both inline so the legacy test still reads the full
+  terminal SSE sequence in one shot. The new `start_url_mission`
+  fires `_execute_url_mission` via `_spawn_detached` and returns
+  immediately. `_inflight_tasks` set + `add_done_callback(discard)`
+  prevents GC mid-flight; `# TODO(spec-10)` marker carries the
+  invariant-3 deviation accepted by the spec. (10) **BFF stream
+  proxy `request.signal` + browser `Last-Event-ID` priority.**
+  `sse-streaming-reviewer` flagged two corrections to the initial
+  draft: (a) `fetch(...)` upstream needs `signal: request.signal`
+  so client disconnects propagate immediately to the api instead of
+  waiting for the 60s eviction grace; (b) on EventSource auto-
+  reconnect the browser sends a real `Last-Event-ID` header — the
+  BFF prefers it over the (now-stale) mount-time `?after=<seq>`
+  query param. Both landed before merge. (11) **FSD sibling
+  cross-import lifted.** `fsd-architect` flagged
+  `widgets/mission-detail/index.tsx` importing `TaskLaneCard` from
+  `widgets/task-lane-card`. Refactored `MissionDetailSlideover` to
+  accept a `renderBody: (missionId) => ReactNode` prop;
+  `app/(app)/missions/page.tsx` composes
+  `<TaskLaneCard missionId={...} />` so the slide-over no longer
+  sees a sibling widget. (12) **i18n-keeper findings collapsed**:
+  hardcoded `Autumn` brand → `t("common", "brandName")`;
+  `error as <union>` cast → exported `SubmitMissionError` literal
+  union from the hook; `EN[namespace] as Record<string, string>` →
+  `as unknown as Record<string, string>` per the user-memory
+  TypeScript gotcha. **simplify skill triple landed**: BFF dedupe to
+  `shared/bff/upstream.ts`, `useMemo` for sidebar grouping, single-
+  pass projection in `task-lane-card/index.tsx`, repository
+  singletons in `runner.py`. **Env contract delta (apps/web/.env.local)**
+  — optional: `AUTUMN_API_URL` (default `http://localhost:8000`),
+  used by all three BFF route files via `shared/bff/upstream.ts`.
+  **Verification gate**: `pnpm exec turbo run lint format:check
+  typecheck test build` exits 0 (14/14 tasks, 4 cached); 21 web
+  Vitest cases pass (translate / useShortcut / useMissionStream /
+  useSubmitMission); api pytest 41 passed, 12 skipped (the 4 new
+  cases — POST mission quick-return, stream replay, ownership 404,
+  list_all RLS — are `DATABASE_URL`-gated, same pattern as Spec 05/
+  07). Two Done-when items are deferred to a human reviewer (live
+  Clerk smoke + Lighthouse/axe), logged in Open Questions #8.
+  Next: Spec 09.
