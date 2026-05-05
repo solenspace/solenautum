@@ -33,3 +33,6 @@ Thumbs.db
 
 # Lefthook
 .lefthook-local.yml
+
+# Local snapshot store (LocalFsBlobStore dev/test backend)
+apps/api/data/
