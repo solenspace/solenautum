@@ -11,7 +11,7 @@ resuming a session.
 
 ## Current Goal
 
-- Implementing `specs/06-sse-protocol-and-streaming.md`.
+- Implementing `specs/07-single-task-agent-and-http-tier.md`.
 
 ## Completed
 
@@ -116,18 +116,43 @@ resuming a session.
   into the `users` table via `UserRepository`. Three test modules
   (3 blob tests pass, 3 repository + 3 webhook tests skipif env
   vars unset). `turbo run lint format:check typecheck test` exits 0.
+- **Spec 06 — sse-protocol-contract.** Single source of truth landed at
+  `packages/sse-protocol/schema.json` (JSON Schema Draft 2020-12, nine
+  event variants under `oneOf`: `token`, `tool_start`, `tool_end`,
+  `task_start`, `task_end`, `url_discovered`, `selector_recovered`,
+  `done`, `error`). `BaseEvent` factors `mission_id` + `seq`; each
+  variant locally re-declares `["type", "content"]` plus `task_id` for
+  per-task variants. Codegen pipeline (`scripts/generate.ts` via tsx,
+  driven by spawnSync arg arrays so paths with spaces survive) emits
+  `generated/types.ts` (TypeScript discriminated union with per-variant
+  literal `type`) and
+  `generated/python/autumn_sse_protocol/models.py` (pydantic v2
+  `RootModel[Union[...]]` with per-variant `Literal` discriminator).
+  `apps/web` consumes via `@autumn/sse-protocol` workspace dep;
+  `apps/api` consumes via `[tool.uv.sources]` editable path dep
+  (`autumn-sse-protocol`). Round-trip tests: 5 vitest cases
+  (`packages/sse-protocol/tests/round-trip.test.ts`, Ajv 2020-12
+  validator) and 3 pytest cases (`apps/api/tests/test_sse_protocol.py`,
+  pydantic `model_validate` + JSON round-trip). Ring-buffer +
+  `Last-Event-ID` resume specified as a contract; runtime lands in
+  Spec 07 (`apps/api/app/sse.py`). `turbo run lint format:check
+  typecheck test` exits 0 across all three workspace packages.
 
 ## In Progress
 
-- `specs/06-sse-protocol-and-streaming.md` — to begin next session.
+- `specs/07-single-task-agent-and-http-tier.md` — to begin next
+  session.
 
 ## Next Up
 
-- Implement `specs/06-sse-protocol-and-streaming.md`
-  (`packages/sse-protocol` JSON Schema + codegen, single-queue per
-  mission, ring buffer, `Last-Event-ID` resume). The remaining specs
-  follow in numbered order; each spec's `Done when` checklist gates
-  progress to the next.
+- Implement `specs/07-single-task-agent-and-http-tier.md` (Pydantic AI
+  single-task agent, HTTP-tier scrape tool via Scrapling AsyncFetcher,
+  Crawl4AI markdown extraction, OpenRouter→Groq fallback, SSE emitter
+  in `apps/api/app/sse.py` enforcing the Spec 06 contract — ring
+  buffer of 200, single per-mission queue, `Last-Event-ID` resume,
+  monotonic `seq`, per-event SSE `id:`, 15s heartbeat). The remaining
+  specs follow in numbered order; each spec's `Done when` checklist
+  gates progress to the next.
 
 ## Open Questions
 
@@ -385,3 +410,66 @@ RLS policy migration and verify cross-tenant isolation test."
   (`r2`|`local`, default `local`), `R2_ACCOUNT_ID`,
   `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET`,
   `CLERK_WEBHOOK_SIGNING_SECRET`. Next: Spec 06.
+- 2026-05-05: Spec 06 shipped. Six deviations / decisions worth
+  recording: (1) **Spec filename is `06-sse-protocol-contract.md`,
+  not `06-sse-protocol-and-streaming.md`** — earlier tracker entries
+  used the stale name. The contract-only scope is correct (streaming
+  runtime is Spec 07). Fixed the references throughout this file.
+  (2) **Codegen tool stack diverges from the spec.** Spec 06 specified
+  quicktype 23 for both targets. Verified locally that quicktype 23.2.6
+  cannot preserve `oneOf` discriminated unions — even with
+  `--explicit-unions --prefer-unions` it collapses every variant into
+  a single flat type with a flattened `ContentObject`, dropping per-
+  task `task_id` enforcement and per-variant `content` shapes. Since
+  the spec's tests and consumers depend on per-variant literals and
+  `RootModel.root` access, swapped the pipeline to:
+  `json-schema-to-typescript@^15` for TS (proper discriminated union),
+  `datamodel-code-generator==0.32.0` invoked via `uvx` for Python
+  (proper `RootModel[Union[...]]` with per-variant `Literal['type']`).
+  No postprocess script needed — datamodel-codegen emits modern
+  pydantic v2 idioms directly (`X | None`, `dict[str, Any]`,
+  `Literal[...]`, `RootModel`). The "single tool / consistency wins"
+  tradeoff in the spec's design notes assumes quicktype produces
+  correct output; it does not for our schema. (3) **`requires.required`
+  refactor.** Original spec put `["type", "content", "mission_id",
+  "seq"]` on `BaseEvent.required` and only `["task_id"]` per variant.
+  Ajv strict mode (correctly) rejects this — `BaseEvent.properties`
+  doesn't declare `type` / `content` (those are added per variant via
+  `allOf`), so `required` references undefined properties. Fixed by
+  shrinking `BaseEvent.required` to `["mission_id", "seq"]` and
+  adding `["type", "content"]` (plus `task_id` for per-task variants)
+  to each variant's local required clause. Bonus: generated TS now
+  marks per-variant content as required (was optional before).
+  (4) **Quicktype CLI quirks discovered during the abandoned attempt**
+  worth memorializing: quicktype 23.2.6's `--python-version` only
+  accepts `3.5|3.6|3.7` (not 3.12 as the spec assumed); paths
+  containing spaces (the repo lives under "PLANET UTOPIA") fail when
+  passed to `execSync` via string templates — switched the codegen
+  driver to `spawnSync(cmd, args[])` so paths bypass shell tokenizing
+  entirely. The `spawnSync` pattern is preserved for the
+  json2ts/datamodel-codegen pipeline. (5) **`per-package biome.json`
+  removed.** Spec asked for a local override that ignores
+  `generated/`. The repo-root `biome.json` already excludes
+  `**/generated` globally (per Spec 02), and biome 2.x's `extends:
+  ["//"]` syntax is invalid. Removed the local file — root config is
+  authoritative; codegen output is excluded by the global ignore.
+  (6) **`tsconfig.target` set to `ESNext` in
+  `packages/sse-protocol/tsconfig.json`** to silence vite/esbuild's
+  "Unrecognized target environment ES2024" warning during vitest
+  runs. Inherited base sets `ES2024` for runtime emitters; the package
+  itself only emits no-emit type checks, so `ESNext` is harmless.
+  Other minor changes: added `typescript@^6.0.0` directly to
+  `packages/sse-protocol/devDependencies` (was being shadowed by an
+  older transitive); `autumn_sse_protocol` added to
+  `apps/api/pyproject.toml`'s ruff `known-first-party` so the
+  isort group classification is correct; `esbuild: true` added to
+  `pnpm-workspace.yaml` allowBuilds (same pattern as sharp/lefthook
+  for build-script gating). **Env contract delta**: none — Spec 06
+  is pure schema + codegen; no env vars introduced. **Manual mutation
+  test** verified implicitly when the `BaseEvent.required` refactor
+  forced `pnpm run generate` and both `generated/types.ts` and
+  `generated/python/.../models.py` updated in lockstep, after which
+  all 8 round-trip tests still pass. **Verification gate**:
+  `turbo run lint format:check typecheck test` exits 0 across
+  `@autumn/web`, `@autumn/api`, and `@autumn/sse-protocol`. Next:
+  Spec 07.
