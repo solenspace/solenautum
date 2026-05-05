@@ -4,9 +4,25 @@
   "private": true,
   "main": "./generated/index.ts",
   "types": "./generated/index.ts",
+  "exports": {
+    ".": "./generated/index.ts",
+    "./schema.json": "./schema.json"
+  },
   "scripts": {
+    "generate": "tsx scripts/generate.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
     "lint": "biome lint .",
     "format": "biome format --write .",
     "format:check": "biome format ."
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "ajv": "^8",
+    "ajv-formats": "^3",
+    "json-schema-to-typescript": "^15",
+    "tsx": "^4",
+    "typescript": "^6.0.0",
+    "vitest": "^2"
   }
 }
