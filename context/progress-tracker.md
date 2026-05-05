@@ -11,7 +11,7 @@ resuming a session.
 
 ## Current Goal
 
-- Implementing `specs/07-single-task-agent-and-http-tier.md`.
+- Implementing `specs/08-mission-form-and-stream-ui.md`.
 
 ## Completed
 
@@ -116,6 +116,62 @@ resuming a session.
   into the `users` table via `UserRepository`. Three test modules
   (3 blob tests pass, 3 repository + 3 webhook tests skipif env
   vars unset). `turbo run lint format:check typecheck test` exits 0.
+- **Spec 07 — single-task-agent-and-http-tier.** Pydantic AI agent
+  (`Agent[HttpToolDeps, MissionResult]` with `defer_model_check=True`,
+  `retries=2`, closure-captured `last_scrape: list[HttpScrapeResult]`)
+  registers one tool (`scrape`) wrapping `app/tools/http.py::scrape_http`.
+  HTTP-tier path: Scrapling `AsyncFetcher.get` (stealthy headers, follow
+  redirects, 15s timeout) → `app/extract/__init__.py::MarkdownExtractor`
+  (Crawl4AI `AsyncWebCrawler` with `AsyncHTTPCrawlerStrategy()` — no
+  Playwright spawn — fed via `raw://{html}` URL scheme). LLM chain:
+  `OpenRouterProvider` (`openai/gpt-oss-120b:free`) primary →
+  `GroqProvider` (`llama-3.3-70b-versatile`) fallback, switching on
+  HTTP 429 / 5xx only (invariant 12); both providers cap
+  `ModelSettings(max_tokens=2048)`. Langfuse 2.60.10 tracing
+  (`start_mission_trace` opens one trace per mission with `mission_id`
+  + `task_id` + `user_id` metadata; `@observe(name="tool.scrape_http")`
+  nests tool spans; `emit_provider_switch` tags the trace on fallback;
+  client constructed with `enabled=False` when keys are missing).
+  `app/sse.py` ships the canonical Spec 06 contract — per-mission
+  `_MissionState` with monotonic `seq`, `deque(maxlen=200)` ring buffer,
+  single `asyncio.Queue` (single-serialization invariant 4), 15s
+  heartbeat via `asyncio.wait_for(queue.get(), timeout=15)` (no detached
+  task), `Last-Event-ID` resume with replay+drain under one lock,
+  synthetic `resume_lost` (no `id:` line so EventSource clients don't
+  loop), terminal-event eviction with 60s grace; `setdefault` replaced
+  with `.get()` so an evicted mission resurrected by reconnect emits
+  `resume_lost` instead of hanging. `runner.run_url_mission` enforces
+  invariants 1 / 5 / 7 / 10 / 11 / 12: `assert_safe_url` fail-fast
+  before DB writes, mission + task rows persist before the first SSE
+  event, success and failure paths share one `try/except` so a transient
+  DB error in the post-agent block still emits terminal `error` + `done`,
+  `_emit` helper centralizes the `seq=0`-placeholder convention, SSE
+  status fields use the protocol's `Status` / `MissionStatus` / `Tier`
+  enums (not raw strings or persistence-layer enums). `/run-mission`
+  GET endpoint (`@limiter.limit("60/minute")`, `Last-Event-ID` header
+  threaded into `emitter.stream`) awaits the runner inline — Spec 10
+  separates start from streaming. FastAPI `lifespan` calls
+  `probe_providers()` at boot, logging credential presence per provider
+  + Langfuse without firing any token-spending completion. Five new
+  `Settings` fields added (`OPENROUTER_API_KEY`, `GROQ_API_KEY`,
+  `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_HOST`), all
+  Optional with defaults so the api boots without keys; `apps/api/.env`
+  carries commented entries. Four test files (`test_llm_chain.py` —
+  five cases proving invariant 12 (no fallback on 400 / non-HTTP
+  exceptions); `test_sse_emitter.py` — four cases including the
+  boundary case `last_event_id == oldest_seq - 1`; `test_http_tool.py`
+  — five SSRF parameterized cases; `test_run_mission_route.py` — two
+  end-to-end cases gated on `DATABASE_URL`, stubbing the agent + tool
+  to exercise the SSE pipeline + DB persistence hermetically). Five
+  named-agent gates ran (scrape-pipeline-doctor, prompt-engineer,
+  sse-streaming-reviewer, llm-cost-guard, code-reviewer); each issue
+  surfaced was fixed before merge. `simplify` skill pass collapsed five
+  `SseEvent.model_validate(...)` blocks into the `_emit` helper, threaded
+  the protocol enums through, and removed the no-op `errors="replace"`
+  on `str.encode("utf-8")` in the extractor. `turbo run lint
+  format:check typecheck test build` exits 0 (41 passed, 8 skipped —
+  the skips are the `DATABASE_URL`-gated tests).
+
 - **Spec 06 — sse-protocol-contract.** Single source of truth landed at
   `packages/sse-protocol/schema.json` (JSON Schema Draft 2020-12, nine
   event variants under `oneOf`: `token`, `tool_start`, `tool_end`,
@@ -140,19 +196,16 @@ resuming a session.
 
 ## In Progress
 
-- `specs/07-single-task-agent-and-http-tier.md` — to begin next
-  session.
+- `specs/08-mission-form-and-stream-ui.md` — to begin next session.
 
 ## Next Up
 
-- Implement `specs/07-single-task-agent-and-http-tier.md` (Pydantic AI
-  single-task agent, HTTP-tier scrape tool via Scrapling AsyncFetcher,
-  Crawl4AI markdown extraction, OpenRouter→Groq fallback, SSE emitter
-  in `apps/api/app/sse.py` enforcing the Spec 06 contract — ring
-  buffer of 200, single per-mission queue, `Last-Event-ID` resume,
-  monotonic `seq`, per-event SSE `id:`, 15s heartbeat). The remaining
-  specs follow in numbered order; each spec's `Done when` checklist
-  gates progress to the next.
+- Implement `specs/08-mission-form-and-stream-ui.md` (Next 16 client UI
+  for the mission form + SSE-driven streaming view; consumes the
+  `GET /run-mission` endpoint shipped by Spec 07; FSD layering enforced
+  by `fsd-architect`; i18n keys enforced by `i18n-keeper`). The
+  remaining specs follow in numbered order; each spec's `Done when`
+  checklist gates progress to the next.
 
 ## Open Questions
 
@@ -164,12 +217,15 @@ resuming a session.
    search. Both have free tiers. Revisit after
    `specs/12-url-discovery-tavily.md` ships if discovery quality is
    mixed.
-3. **Per-tier output schema.** Working assumption: HTTP returns
-   parsed markdown via Crawl4AI; Stealth returns parsed markdown;
-   Dynamic returns structured extraction (JSON via a Pydantic AI
-   tool result type). Pin shape in
-   `specs/07-single-task-agent-and-http-tier.md` before tools are
-   wired.
+3. **Per-tier output schema.** **HTTP-tier resolved in Spec 07**:
+   `HttpScrapeResult` Pydantic model — `url: str`, `markdown: str`
+   (Crawl4AI `DefaultMarkdownGenerator` via `AsyncHTTPCrawlerStrategy`),
+   `raw_html: bytes`, `latency_ms: int`. The agent's typed output is
+   `MissionResult` (`summary`, `primary_url`, `markdown_excerpt`); the
+   runner persists the full markdown via the closure-captured tool
+   result. Stealth + Dynamic tiers (Specs 09, 13) will return
+   `HttpScrapeResult`-shaped models for parsed-markdown paths and a
+   structured `Extracted[T]` model for JSON extraction.
 4. **OpenRouter free-tier rate limits.** `gpt-oss-120b:free` is
    provider-rate-limited; the fallback chain (→ Groq) handles
    exhaustion. Track real-world rate-limit behavior after
@@ -473,3 +529,72 @@ RLS policy migration and verify cross-tenant isolation test."
   `turbo run lint format:check typecheck test` exits 0 across
   `@autumn/web`, `@autumn/api`, and `@autumn/sse-protocol`. Next:
   Spec 07.
+- 2026-05-05: Spec 07 shipped. Eleven deviations / decisions worth
+  recording: (1) **Library versions diverge from the planning audit.**
+  Tracker's pre-implementation notes called for Pydantic AI 1.89.1 /
+  Scrapling 0.4.7 / Crawl4AI 0.8.5; uv resolved `pydantic-ai==1.44.0`,
+  `langfuse==2.60.10`, `scrapling==0.2.99`, `crawl4ai==0.8.6`. Scrapling
+  >= 0.3 conflicts with Crawl4AI's `lxml<6` constraint, so 0.2.99 is
+  the highest compatible release. Pydantic AI defaulted to 0.0.30 from
+  a stale lower bound; tightened the `pyproject.toml` constraint to
+  `>=0.5` to pull 1.44. (2) **Crawl4AI `raw://` API differs from the
+  spec's draft.** The spec's `MarkdownExtractor` passed `html=` as a
+  kwarg to `arun(...)`; in 0.8.6 that's silently ignored — the HTML
+  must be embedded in the URL itself (`url=f"raw://{html}"`). Also
+  swapped `BrowserConfig` for `AsyncHTTPCrawlerStrategy()` so no
+  Playwright session is spawned for already-fetched HTML. (3)
+  **Scrapling `AsyncFetcher.get` is a classmethod**, not an instance
+  method (the spec's draft instantiated `AsyncFetcher()` first). Calling
+  `AsyncFetcher.get(url, ...)` directly avoids a deprecation warning
+  the package logs at instantiation. (4) **`scrapling.Response.body`
+  is a `TextHandler` (subclass of `str`), not bytes** — the spec's
+  pipeline assumed bytes. `MarkdownExtractor.extract(html: str)` now
+  takes a decoded string; `ExtractedPage.raw_html` re-encodes via
+  `str.encode("utf-8")` (lossless because Python `str` is unicode).
+  (5) **`MissionRepository.create()` does not take `user_id=`**; the
+  spec's draft did. The actual repo (Spec 05) reads `user_id` from
+  `_current_user`. The runner sets the contextvar via
+  `_current_user.set(user)` and the SET LOCAL flows through `transaction()`
+  into RLS. (6) **Closure-captured `last_scrape: list[HttpScrapeResult]`
+  inside `build_agent()`** lets the runner persist the *full* parsed
+  markdown (not just the 500-char `MissionResult.markdown_excerpt`).
+  `_run` calls `last_scrape.clear()` at every chain attempt so a
+  primary→fallback transition can't merge two tool histories. (7)
+  **Mypy strict needs `[[tool.mypy.overrides]]` blocks** for the four
+  new untyped deps (`crawl4ai.*`, `langfuse.*`, `scrapling.*`,
+  `autumn_sse_protocol.*`) plus a handful of per-line `# type: ignore`
+  comments — `[no-any-unimported]` on the `SseEvent`/`Langfuse`/
+  `StatefulTraceClient` annotations, `[untyped-decorator]` on the
+  `@observe(...)` over `scrape_http`. (8) **Five env-var fields are
+  Optional** (`OPENROUTER_API_KEY`, `GROQ_API_KEY`,
+  `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_HOST`) so
+  CI / fresh checkouts boot without keys; `Langfuse(enabled=False)` is
+  the no-op posture when keys are missing, and `LLMProviderChain`
+  raises at first call rather than at construction. (9) **The startup
+  `probe_providers()` is intentionally credentials-only** — it does
+  not fire a real completion. The spec's draft asked for a 1-token
+  completion at boot; on free-tier rate limits that would burn the
+  window. Probe just logs `configured` / `missing` per provider; real
+  availability surfaces on the first mission. (10) **R2 snapshot upload
+  is intentionally NOT wired** per the spec's "Out of Scope" block —
+  `tasks.snapshot_key=None`, `tasks.snapshot_truncated=False`. Spec
+  09/10 introduces the uniform tier-result handling. (11) **Five named-
+  agent gates ran and surfaced four real fixes that landed in the
+  diff**: (a) `runner.run_url_mission` success path was outside the
+  `try/except`, so a transient DB error mid-success would leave the
+  task without a terminal event — wrapped in the same try/except as
+  the failure terminals (invariant 5). (b) `start_mission_trace`
+  signature gained `task_id: UUID` so trace metadata carries both ids
+  per `code-standards.md`. (c) `SseEmitter.stream` switched
+  `setdefault` → `.get()` so an evicted-then-resurrected mission emits
+  `resume_lost` instead of hanging on an empty queue. (d) `simplify`
+  pass added an `_emit` helper, threaded the protocol's `Status` /
+  `MissionStatus` / `Tier` enums into the SSE content fields, and
+  removed the no-op `errors="replace"` on `str.encode("utf-8")` in the
+  extractor. **Env contract delta (apps/api/.env)** — optional:
+  `OPENROUTER_API_KEY`, `GROQ_API_KEY`, `LANGFUSE_PUBLIC_KEY`,
+  `LANGFUSE_SECRET_KEY`, `LANGFUSE_HOST` (default
+  `https://cloud.langfuse.com`). **Verification gate**: `pnpm exec
+  turbo run lint format:check typecheck test build` exits 0; pytest
+  reports 41 passed, 8 skipped (all 8 are `DATABASE_URL`-gated, same
+  pattern as Spec 05). Next: Spec 08.
