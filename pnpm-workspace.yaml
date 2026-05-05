@@ -6,5 +6,6 @@ allowBuilds:
   '@clerk/shared': true
   esbuild: true
   lefthook: true
+  msw: true
   sharp: true
   unrs-resolver: true

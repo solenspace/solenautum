@@ -17,7 +17,9 @@
       "!**/dist",
       "!**/.venv",
       "!**/__pycache__",
-      "!**/generated"
+      "!**/generated",
+      "!apps/web/components/ui",
+      "!apps/web/shared/hooks/use-mobile.ts"
     ]
   },
   "formatter": {

@@ -11,7 +11,7 @@ resuming a session.
 
 ## Current Goal
 
-- Implementing `specs/08-mission-form-and-stream-ui.md`.
+- Implementing `specs/09-stealth-tier.md`.
 
 ## Completed
 
@@ -172,6 +172,101 @@ resuming a session.
   format:check typecheck test build` exits 0 (41 passed, 8 skipped —
   the skips are the `DATABASE_URL`-gated tests).
 
+- **Spec 08 — web-shell-and-stream-consumer.** Tailwind 4 + shadcn 4
+  (`base-nova` style, `--base radix` initially requested but the latest
+  CLI ships with `@base-ui/react` primitives — accepted; Base UI Dialog
+  is API-compatible with the spec's Radix-based code) initialized in
+  `apps/web/` with `pnpm dlx shadcn@latest init -d -y --no-monorepo`;
+  ten primitives added (`button`, `input`, `dialog`, `sheet`, `command`,
+  `kbd`, `separator`, `scroll-area`, `sidebar`, `tooltip` — plus
+  `textarea`, `skeleton`, `input-group` pulled in as transitive deps).
+  `lib/utils.ts` moved to `shared/utils/cn.ts` and `components.json`
+  aliases rewired (`utils → @/shared/utils/cn`, `hooks → @/shared/hooks`,
+  `lib → @/shared/utils`). `globals.css` rewritten with Tailwind 4
+  syntax (`@import "tailwindcss"`, `@theme inline`, `--radius: 0.375rem`)
+  bridging shadcn variables to the bone+narrow-black palette from
+  `ui-context.md` for both light and dark modes (full color token table
+  including sidebar, accent, state-success, state-error). i18n primitive
+  bootstrapped at `shared/i18n/`: typed `EN` table for `common`,
+  `mission`, `validation` namespaces (24+ keys); pure `translate()` with
+  `{name}` interpolation + plural `_one`/`_other` lookup; `I18nProvider`
+  + `useT` (single-locale today, locale-extensible signature);
+  `I18nTestWrapper` for Vitest. Keyboard registry at `shared/keyboard/`
+  with `useShortcut(combo, handler, options?)` supporting normalized
+  `⌘`/`cmd`/`ctrl`/`⇧`/`shift` parsing, optional `allowInInput` opt-in
+  (top-bar URL field uses it for `Cmd+Enter`), and the `KeyboardShortcuts`
+  shell-level mount placeholder. FSD layout: `entities/mission/types.ts`
+  (`MissionRow`, `MissionStatus`, `MissionMode`); `features/run-mission/`
+  ships `store.ts` (zustand `openMissionId`), `use-submit-mission.ts`
+  (zod URL schema, validators return keys not strings, exported
+  `SubmitMissionError` literal union), `use-missions.ts` (5s polling
+  with `visibilitychange` pause, grouped `byStatus`), `use-recent-
+  missions.ts` (last-3 terminals), `use-mission-stream.ts` (single
+  `EventSource`, `localStorage` seq tracking, `?after=<seq>` resume,
+  unbounded events array — flagged for Spec 11 cap), `index.ts`
+  re-exports. Widgets: `top-bar` (44px h-11 with brand wordmark,
+  persistent URL input, `/` focus + `Cmd+Enter` submit), `mission-
+  sidebar` + `mission-row` (32px rows, status dot + 8-char id +
+  truncated URL + relative time), `mission-detail` (slide-over Sheet
+  accepting `renderBody` callback; FSD-clean — no sibling cross-import),
+  `task-lane-card` + `tier-badge`/`tool-chip`/`reasoning-stream`/
+  `result-preview` (3-tier hierarchy: dim reasoning → neutral chips →
+  high-contrast result), `command-palette` (cmdk via shadcn Command;
+  Cmd+K toggle; sections: Recent / Actions / Account). App shell:
+  `app/(app)/layout.tsx` (server component, `await auth()` redirect)
+  composes top bar + sidebar + main + palette + KeyboardShortcuts
+  inside `SidebarProvider`; `app/(app)/missions/page.tsx` renders
+  `EmptyState` + `MissionDetailSlideover` with `<TaskLaneCard>`
+  composed at the page layer; old `app/missions/page.tsx` placeholder
+  deleted. BFF routes (`runtime = "nodejs"`): `app/api/missions/route.ts`
+  (POST + GET with Clerk JWT forwarding), `app/api/missions/[id]/
+  route.ts` (single-mission JSON), `app/api/missions/[id]/stream/
+  route.ts` (SSE proxy: prefers browser-set `Last-Event-ID` header on
+  auto-reconnect over the mount-time `?after=<seq>` query param;
+  forwards `request.signal` so client disconnects propagate to the api
+  immediately instead of waiting for the 60s eviction grace; passes
+  `upstream.body` `ReadableStream` through verbatim — no buffering).
+  `RouteContext<'/api/missions/[id]/stream'>` typing + `await
+  ctx.params` per Next 16 conventions; `next typegen` runs cleanly.
+  API side: `runner.py` split into `_create_mission_and_task` (SSRF +
+  rows + `task_start` emission), `_execute_url_mission` (agent loop +
+  terminal events; defensive contextvar re-bind), `_spawn_detached`
+  (module-level `_inflight_tasks` set + `add_done_callback(discard)`
+  carrying `# TODO(spec-10): TaskGroup ownership` marker — explicit
+  invariant-3 deviation accepted), `start_url_mission` (returns mission
+  id immediately), `run_url_mission` (compatibility shim that awaits
+  inline so the legacy `GET /run-mission?url=...` test stays green).
+  `routes.py`: `POST /missions` (returns `{mission_id}` 201), `GET
+  /missions` (list_all, JSON), `GET /missions/{id}` (single, 404 on
+  cross-tenant), `GET /run-mission/{id}/stream` (ownership lookup
+  fast-path 404 + `emitter.stream(...)` with `Last-Event-ID` header);
+  shared `_stream_response` helper between legacy and new endpoints.
+  `MissionRepository.list_all()` added (newest-first, RLS + explicit
+  `user_id` filter). Three new pytest cases (POST mission quick-return,
+  stream replay terminal, list_all RLS isolation; all DB-gated). Three
+  Vitest test files: `translate` (4 cases), `useShortcut` (6 cases),
+  `useMissionStream` (6 cases with FakeEventSource), `useSubmitMission`
+  (5 cases with mock fetch). 21 web tests + existing api tests pass.
+  `vitest.config.mts` + `vitest.setup.mts` (jsdom `localStorage`
+  polyfill because jsdom 29 ships an opaque proxy; Storage Map-backed
+  shim covers `getItem`/`setItem`/`clear`/`key`/`length`/`removeItem`).
+  `@vitejs/plugin-react@4` paired with `vitest@^3` for Vite 5 peer
+  alignment. Repo-root `biome.json` extends ignore list to
+  `apps/web/components/ui/**` and `apps/web/shared/hooks/use-mobile.ts`
+  (shadcn-generated, protected). `pnpm-workspace.yaml` adds `msw: true`
+  to `allowBuilds` (shadcn dlx pulls msw transitively). Three named-
+  agent gates ran (`fsd-architect`: caught a sibling cross-import of
+  TaskLaneCard from MissionDetailSlideover — fixed by lifting
+  composition to `app/(app)/missions/page.tsx` via `renderBody` prop;
+  `i18n-keeper`: caught `EN[namespace] as Record<string,string>` cast
+  needing `unknown` intermediate, hardcoded `Autumn` brand wordmark
+  needing `common.brandName` key, malformed `noMissionsHint` template
+  needing `noMissionsHintPrefix` companion key, `error as <union>` cast
+  in top-bar needing exported `SubmitMissionError` literal union;
+  `sse-streaming-reviewer`: caught BFF stream proxy missing
+  `request.signal` propagation and missing browser-set `Last-Event-ID`
+  preference). All four classes of finding fixed in the diff before
+  merge. `turbo run lint format:check typecheck test build` exits 0.
 - **Spec 06 — sse-protocol-contract.** Single source of truth landed at
   `packages/sse-protocol/schema.json` (JSON Schema Draft 2020-12, nine
   event variants under `oneOf`: `token`, `tool_start`, `tool_end`,
@@ -196,16 +291,15 @@ resuming a session.
 
 ## In Progress
 
-- `specs/08-mission-form-and-stream-ui.md` — to begin next session.
+- `specs/09-stealth-tier.md` — to begin next session.
 
 ## Next Up
 
-- Implement `specs/08-mission-form-and-stream-ui.md` (Next 16 client UI
-  for the mission form + SSE-driven streaming view; consumes the
-  `GET /run-mission` endpoint shipped by Spec 07; FSD layering enforced
-  by `fsd-architect`; i18n keys enforced by `i18n-keeper`). The
-  remaining specs follow in numbered order; each spec's `Done when`
-  checklist gates progress to the next.
+- Implement `specs/09-stealth-tier.md` (Camoufox stealth tier behind
+  the existing tier shape; Pydantic AI tool registration; semaphore
+  acquisition; Cloudflare bypass scope only). The remaining specs
+  follow in numbered order; each spec's `Done when` checklist gates
+  progress to the next.
 
 ## Open Questions
 

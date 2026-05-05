@@ -32,6 +32,11 @@ _PREVIEW_CHARS = 500
 # `_spawn_detached` with TaskGroup.create_task and the call sites do not change.
 _inflight_tasks: set[asyncio.Task[None]] = set()
 
+# Repositories are stateless — each method opens its own `transaction()`.
+# Module-level singletons skip per-call object construction in the hot path.
+_missions = MissionRepository()
+_tasks = TaskRepository()
+
 
 async def _emit(
     type_: str,
@@ -84,14 +89,11 @@ async def _create_mission_and_task(*, user: CurrentUser, url: str) -> tuple[Miss
     assert_safe_url(url)
 
     _current_user.set(user)
-    missions = MissionRepository()
-    tasks = TaskRepository()
+    mission = await _missions.create(prompt=url, mode=MissionMode.URL)
+    await _missions.update_status(mission.id, Status.RUNNING)
 
-    mission = await missions.create(prompt=url, mode=MissionMode.URL)
-    await missions.update_status(mission.id, Status.RUNNING)
-
-    task = await tasks.create(mission_id=mission.id, url=url, tier_used=Tier.HTTP)
-    await tasks.update(task.id, status=Status.RUNNING)
+    task = await _tasks.create(mission_id=mission.id, url=url, tier_used=Tier.HTTP)
+    await _tasks.update(task.id, status=Status.RUNNING)
 
     await _emit(
         "task_start",
@@ -126,9 +128,6 @@ async def _execute_url_mission(
     first.
     """
     _current_user.set(user)
-    missions = MissionRepository()
-    tasks = TaskRepository()
-
     trace = start_mission_trace(
         mission_id=mission.id,
         task_id=task.id,
@@ -154,7 +153,7 @@ async def _execute_url_mission(
         latency_ms = last_scrape[-1].latency_ms if last_scrape else None
         preview = full_markdown[:_PREVIEW_CHARS]
 
-        await tasks.update(
+        await _tasks.update(
             task.id,
             status=Status.SUCCEEDED,
             latency_ms=latency_ms,
@@ -175,7 +174,7 @@ async def _execute_url_mission(
             task_id=task.id,
         )
 
-        await missions.update_status(mission.id, Status.SUCCEEDED)
+        await _missions.update_status(mission.id, Status.SUCCEEDED)
         await _emit(
             "done",
             {"mission_status": SseMissionStatus.succeeded.value, "cost_cents": 0},
@@ -194,8 +193,8 @@ async def _execute_url_mission(
             "mission.failed",
             extra={"mission_id": str(mission.id), "task_id": str(task.id)},
         )
-        await tasks.update(task.id, status=Status.FAILED)
-        await missions.update_status(mission.id, Status.FAILED)
+        await _tasks.update(task.id, status=Status.FAILED)
+        await _missions.update_status(mission.id, Status.FAILED)
         await _emit(
             "error",
             {"code": "agent_failed", "message": str(exc)},
