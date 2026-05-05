@@ -63,6 +63,22 @@ class MissionRepository:
             )
             return list((await session.exec(stmt)).all())
 
+    async def list_all(self) -> list[Mission]:
+        """Every mission owned by the current user, newest first.
+
+        RLS would back-stop a missing `user_id` filter, but the application
+        layer always filters explicitly per `code-standards.md` so a logic bug
+        is a 0-row result, not a cross-tenant leak.
+        """
+        user_id = require_user_id()
+        async with transaction() as session:
+            stmt = (
+                select(Mission)
+                .where(Mission.user_id == user_id)
+                .order_by(Mission.created_at.desc())  # type: ignore[attr-defined]
+            )
+            return list((await session.exec(stmt)).all())
+
     async def update_status(self, mission_id: uuid.UUID, status: Status) -> None:
         user_id = require_user_id()
         async with transaction() as session:
