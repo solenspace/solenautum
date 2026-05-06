@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Header, HTTPException, Path, Request, status
 from fastapi.responses import StreamingResponse
@@ -10,10 +10,14 @@ from pydantic import BaseModel, Field, StringConstraints
 from svix.webhooks import Webhook, WebhookVerificationError
 
 from app.config import settings
-from app.persistence.models import Mission, MissionMode, Status
+from app.persistence.models import Mission, MissionMode, MissionPhase, Status
 from app.persistence.repository import MissionRepository, UserRepository
-from app.runner import start_url_mission
-from app.security import RequireUser, limiter
+from app.runner import (
+    start_description_mission,
+    start_url_mission,
+    submit_approval,
+)
+from app.security import RequireUser, assert_safe_url, limiter
 from app.sse import emitter
 
 router = APIRouter()
@@ -26,18 +30,49 @@ _MAX_URLS_PER_MISSION = 20
 _MissionUrl = Annotated[str, StringConstraints(min_length=1, max_length=2048)]
 
 
-class _StartMissionRequest(BaseModel):
-    """Spec 10: callers always pass a list (1-20 URLs). Single-URL
-    submissions wrap a one-element array; the BFF translates the web
-    form for us. Per-URL `max_length=2048` preserves the bound from the
-    Spec 08 single-URL shape.
+class _CreateUrlMissionRequest(BaseModel):
+    """URL-mode mission body. `mode="url"` is the default so legacy
+    clients posting `{"urls": [...]}` continue to parse.
     """
 
+    mode: Literal["url"] = "url"
     urls: list[_MissionUrl] = Field(min_length=1, max_length=_MAX_URLS_PER_MISSION)
 
 
+class _CreateDescriptionMissionRequest(BaseModel):
+    """Description-mode mission body. The discovery agent runs against
+    `query`; user approves the resulting URLs via the side-channel
+    `/missions/{id}/approve` POST.
+    """
+
+    mode: Literal["description"]
+    query: str = Field(..., min_length=1, max_length=2000)
+    skip_approval: bool = False
+
+
+_CreateMissionRequest = Annotated[
+    _CreateUrlMissionRequest | _CreateDescriptionMissionRequest,
+    Field(discriminator="mode"),
+]
+
+
+class ApproveMissionRequest(BaseModel):
+    """Approval-gate submit body. `urls` carries the user-edited subset
+    of `discovered_urls`; each URL is SSRF-validated before the runner
+    is unparked.
+    """
+
+    urls: list[_MissionUrl] = Field(min_length=1, max_length=_MAX_URLS_PER_MISSION)
+    skip_approval: bool = False
+
+
 class _MissionResponse(BaseModel):
-    """JSON projection of a `Mission` row for the BFF list / detail endpoints."""
+    """JSON projection of a `Mission` row for the BFF list / detail endpoints.
+
+    Spec 12 adds `phase`, `skip_approval`, `discovered_urls`, and
+    `approved_urls` so the slide-over can re-render the approval gate
+    after a refresh.
+    """
 
     id: uuid.UUID
     prompt: str
@@ -46,6 +81,10 @@ class _MissionResponse(BaseModel):
     cost_cents: int
     created_at: datetime
     finished_at: datetime | None
+    phase: MissionPhase | None = None
+    skip_approval: bool = False
+    discovered_urls: list[dict[str, Any]] | None = None
+    approved_urls: list[str] | None = None
 
     @classmethod
     def from_row(cls, row: Mission) -> _MissionResponse:
@@ -57,6 +96,10 @@ class _MissionResponse(BaseModel):
             cost_cents=row.cost_cents,
             created_at=row.created_at,
             finished_at=row.finished_at,
+            phase=row.phase,
+            skip_approval=row.skip_approval,
+            discovered_urls=row.discovered_urls,
+            approved_urls=row.approved_urls,
         )
 
 
@@ -132,15 +175,65 @@ async def clerk_webhook(request: Request) -> None:
 async def post_mission(
     request: Request,  # noqa: ARG001 — slowapi keys off the `request` parameter
     user: RequireUser,
-    body: _StartMissionRequest,
+    body: _CreateMissionRequest,
 ) -> _StartMissionResponse:
-    """Start a mission with 1-20 URLs and return immediately with its id.
+    """Start a mission and return immediately with its id.
+
+    Two flavors discriminated on `mode`:
+      - `mode="url"` — 1-20 URLs scraped directly (Spec 10).
+      - `mode="description"` — Tavily discovery + approval gate +
+        scraping (Spec 12).
 
     The runner is owned by the lifespan-scoped TaskGroup (invariant 3);
     the caller picks up SSE on `/run-mission/{mission_id}/stream`.
     """
-    mission_id = await start_url_mission(user=user, urls=body.urls)
+    if isinstance(body, _CreateDescriptionMissionRequest):
+        mission_id = await start_description_mission(
+            user=user, query=body.query, skip_approval=body.skip_approval
+        )
+    else:
+        mission_id = await start_url_mission(user=user, urls=body.urls)
     return _StartMissionResponse(mission_id=mission_id)
+
+
+@router.post(
+    "/missions/{mission_id}/approve",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+@limiter.limit("60/minute")
+async def approve_mission(
+    request: Request,  # noqa: ARG001 — slowapi keys off the `request` parameter
+    user: RequireUser,  # noqa: ARG001 — `RequireUser` binds the contextvar
+    body: ApproveMissionRequest,
+    mission_id: uuid.UUID = Path(...),
+) -> None:
+    """Hand the user-approved URL list to a parked description-mode runner.
+
+    Validates ownership (RLS-scoped lookup), phase (`AWAITING_APPROVAL`),
+    and SSRF-safety on every URL before unparking. A 503 surfaces the
+    "no in-memory pending approval" case that arises after a process
+    restart (Deviation 4 — silent 204 would lie to the client).
+    """
+    mission = await _missions.get(mission_id)
+    if mission is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "mission not found")
+    if mission.phase != MissionPhase.AWAITING_APPROVAL:
+        raise HTTPException(status.HTTP_409_CONFLICT, "mission is not awaiting approval")
+
+    for url in body.urls:
+        assert_safe_url(url)  # invariant 1 — even on user-edited URLs
+
+    outcome = submit_approval(
+        mission_id,
+        approved_urls=list(body.urls),
+        skip_approval=body.skip_approval,
+    )
+    if outcome == "no_pending":
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "approval registry has no pending entry; the runner may have "
+            "restarted — retry once the mission re-enters awaiting_approval",
+        )
 
 
 @router.get("/missions")

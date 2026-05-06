@@ -17,6 +17,13 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent, RunContext
 
+from app.search import DiscoveredUrl
+from app.tools.discover import (
+    DiscoverArgs,
+    DiscoverDeps,
+    DiscoveryResult,
+    discover_urls as discover_urls_impl,
+)
 from app.tools.dynamic import (
     DynamicDeps,
     DynamicScrapeArgs,
@@ -169,3 +176,77 @@ def build_agent() -> Agent[MissionDeps, MissionResult]:
         return result
 
     return agent
+
+
+# --- description-mode discovery agent (Spec 12) -------------------------
+
+
+_DISCOVERY_SYSTEM_PROMPT = """\
+You are Autumn's URL-discovery agent. The user gives you a free-text
+description; you call `discover_urls` once with that query, then return
+the resulting URL list as a DiscoveryMissionResult.
+
+Rules:
+- Call `discover_urls` exactly once. Never twice.
+- If the tool returns reason=no_results, return DiscoveryMissionResult
+  with status='error', error_code='no_results'.
+- If the tool returns reason=upstream_error or rate_limited, return
+  DiscoveryMissionResult with status='error' and the matching error_code.
+- On success, return status='ok' and the urls list.
+
+Do not transform the URLs. Do not filter by score. The user reviews them.
+"""
+
+
+class DiscoveryDeps(BaseModel):
+    """Mission-scoped dependencies passed to `build_discovery_agent`."""
+
+    user_id: str
+    mission_id: UUID
+
+
+class DiscoveryMissionResult(BaseModel):
+    """Discovery agent's typed output. Validated by Pydantic AI on every run."""
+
+    status: Literal["ok", "error"]
+    urls: list[DiscoveredUrl] = Field(default_factory=list)
+    error_code: Literal["discovery_failed", "no_results", "rate_limited"] | None = None
+    error_message: str | None = None
+
+
+def build_discovery_agent() -> Agent[DiscoveryDeps, DiscoveryMissionResult]:
+    """Construct the URL-discovery agent.
+
+    Mirrors `build_agent`'s deferred-model pattern so the LLM-fallback
+    chain in `runner.py` can swap providers without rebuilding the
+    agent. Output is constrained by `DiscoveryMissionResult` so the
+    `prompt-engineer` agent's `output_type` invariant holds.
+    """
+    agent = Agent[DiscoveryDeps, DiscoveryMissionResult](
+        deps_type=DiscoveryDeps,
+        output_type=DiscoveryMissionResult,
+        system_prompt=_DISCOVERY_SYSTEM_PROMPT,
+        retries=2,
+        defer_model_check=True,
+    )
+
+    @agent.tool
+    async def discover_urls(ctx: RunContext[DiscoveryDeps], query: str) -> DiscoveryResult:
+        """Run the search provider for the given query."""
+        result: DiscoveryResult = await discover_urls_impl(
+            DiscoverDeps(user_id=ctx.deps.user_id, mission_id=ctx.deps.mission_id),
+            DiscoverArgs(query=query, max_results=20),
+        )
+        return result
+
+    return agent
+
+
+__all__ = [
+    "DiscoveryDeps",
+    "DiscoveryMissionResult",
+    "MissionDeps",
+    "MissionResult",
+    "build_agent",
+    "build_discovery_agent",
+]

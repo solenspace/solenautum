@@ -12,6 +12,7 @@
     { "$ref": "#/$defs/TaskStart" },
     { "$ref": "#/$defs/TaskEnd" },
     { "$ref": "#/$defs/UrlDiscovered" },
+    { "$ref": "#/$defs/DiscoveryComplete" },
     { "$ref": "#/$defs/SelectorRecovered" },
     { "$ref": "#/$defs/Done" },
     { "$ref": "#/$defs/SseError" }
@@ -138,6 +139,26 @@
                 "url": { "type": "string", "format": "uri" },
                 "source": { "type": "string", "description": "Provider name (e.g. tavily)" },
                 "score": { "type": "number", "minimum": 0, "maximum": 1 }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "DiscoveryComplete": {
+      "allOf": [
+        { "$ref": "#/$defs/BaseEvent" },
+        {
+          "type": "object",
+          "required": ["type", "content"],
+          "properties": {
+            "type": { "const": "discovery_complete" },
+            "content": {
+              "type": "object",
+              "required": ["count", "awaiting_approval"],
+              "properties": {
+                "count": { "type": "integer", "minimum": 0 },
+                "awaiting_approval": { "type": "boolean" }
               }
             }
           }

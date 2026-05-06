@@ -20,6 +20,8 @@ export const EN = {
     toggleSidebar: "Toggle sidebar",
     signOut: "Sign out",
     goTo: "Go to",
+    selectAll: "Select all",
+    deselectAll: "Deselect all",
   },
   mission: {
     urlPlaceholder: "Paste a URL — ⌘↩ to run",
@@ -64,6 +66,25 @@ export const EN = {
     ariaLaneTerminal: "Lane {url} {status}",
     ariaMissionComplete: "{succeeded} of {total} succeeded",
     ariaMissionFailed: "Mission failed: {message}",
+    newDescriptionMission: "New description-mode mission",
+    descriptionPlaceholder: "Describe what you need…",
+    searching: "Searching… {count} found",
+    searching_one: "Searching… 1 found",
+    searching_other: "Searching… {count} found",
+    discoveryComplete: "{count} URLs found",
+    discoveryComplete_one: "1 URL found",
+    discoveryComplete_other: "{count} URLs found",
+    approveNUrls: "Approve {count} URLs",
+    approveNUrls_one: "Approve 1 URL",
+    approveNUrls_other: "Approve {count} URLs",
+    selectedOf: "{selected} of {total}",
+    skipApprovalForFutureSearches: "Skip approval for this mission's future searches",
+    refineQuery: "Refine query",
+    querySpecificity:
+      "Query needs more specificity. Try adding a domain, timeframe, or a concrete entity.",
+    searchPaused: "Search paused — Tavily returned {status}.",
+    noResults: "No results for this query.",
+    edited: "edited",
   },
   validation: {
     urlRequired: "URL required",
@@ -73,6 +94,8 @@ export const EN = {
     missionUrlsRequired: "Add at least one URL",
     missionUrlsTooMany: "Maximum 20 URLs per mission",
     missionUrlsInvalid: "One or more URLs are invalid",
+    queryRequired: "Query required",
+    queryTooLong: "Query too long",
   },
 } as const;
 

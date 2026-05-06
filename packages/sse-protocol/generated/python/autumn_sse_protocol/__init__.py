@@ -6,6 +6,7 @@ Do not edit by hand. Regenerate via:
 
 from .models import (
     BaseEvent,
+    DiscoveryComplete,
     Done,
     SelectorRecovered,
     SseError,
@@ -20,6 +21,7 @@ from .models import (
 
 __all__ = [
     "BaseEvent",
+    "DiscoveryComplete",
     "Done",
     "SelectorRecovered",
     "SseError",
