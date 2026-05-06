@@ -63,6 +63,28 @@ async def test_rls_blocks_cross_tenant_read(user_a: CurrentUser, user_b: Current
 
 
 @pytest.mark.asyncio
+async def test_list_all_filters_by_user(user_a: CurrentUser, user_b: CurrentUser):
+    _current_user.set(user_a)
+    repo = MissionRepository()
+    a1 = await repo.create(prompt="a1", mode=MissionMode.URL)
+    a2 = await repo.create(prompt="a2", mode=MissionMode.URL)
+
+    _current_user.set(user_b)
+    await repo.create(prompt="b1", mode=MissionMode.URL)
+
+    _current_user.set(user_a)
+    rows = await repo.list_all()
+    ids = {row.id for row in rows}
+    assert {a1.id, a2.id}.issubset(ids)
+    # newest-first ordering
+    timestamps = [row.created_at for row in rows]
+    assert timestamps == sorted(timestamps, reverse=True)
+    # cross-tenant rows are absent
+    prompts = {row.prompt for row in rows}
+    assert "b1" not in prompts
+
+
+@pytest.mark.asyncio
 async def test_task_inherits_rls_via_mission(user_a: CurrentUser, user_b: CurrentUser):
     _current_user.set(user_a)
     mission_repo = MissionRepository()

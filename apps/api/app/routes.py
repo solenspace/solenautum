@@ -1,19 +1,60 @@
 from __future__ import annotations
 
+import uuid
+from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Header, HTTPException, Query, Request, status
+from fastapi import APIRouter, Header, HTTPException, Path, Query, Request, status
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 from svix.webhooks import Webhook, WebhookVerificationError
 
 from app.config import settings
-from app.persistence.repository import UserRepository
-from app.runner import run_url_mission
+from app.persistence.models import Mission, MissionMode, Status
+from app.persistence.repository import MissionRepository, UserRepository
+from app.runner import run_url_mission, start_url_mission
 from app.security import RequireUser, limiter
 from app.sse import emitter
 
 router = APIRouter()
 _users = UserRepository()
+_missions = MissionRepository()
+
+
+class _StartMissionRequest(BaseModel):
+    url: str = Field(min_length=1, max_length=2048)
+
+
+class _MissionResponse(BaseModel):
+    """JSON projection of a `Mission` row for the BFF list / detail endpoints."""
+
+    id: uuid.UUID
+    prompt: str
+    mode: MissionMode
+    status: Status
+    cost_cents: int
+    created_at: datetime
+    finished_at: datetime | None
+
+    @classmethod
+    def from_row(cls, row: Mission) -> _MissionResponse:
+        return cls(
+            id=row.id,
+            prompt=row.prompt,
+            mode=row.mode,
+            status=row.status,
+            cost_cents=row.cost_cents,
+            created_at=row.created_at,
+            finished_at=row.finished_at,
+        )
+
+
+class _MissionListResponse(BaseModel):
+    missions: list[_MissionResponse]
+
+
+class _StartMissionResponse(BaseModel):
+    mission_id: uuid.UUID
 
 
 def _pick_primary_email(data: dict[str, Any]) -> str | None:
@@ -83,13 +124,82 @@ async def run_mission(
     url: str = Query(..., min_length=1, max_length=2048),
     last_event_id: int | None = Header(default=None, alias="Last-Event-ID"),
 ) -> StreamingResponse:
-    """Single-task mission entry point. Awaits the mission inline (Spec 07
-    single-task missions are sub-second to a few seconds) and then streams the
-    SSE projection. Spec 10 separates start from streaming so an N-URL mission
-    can begin streaming while later tasks queue.
+    """Legacy single-task mission entry point. Awaits the mission inline so the
+    response body carries the full event sequence in one pass — used by Spec
+    07's hermetic test fixture and a backwards-compatible client. New clients
+    use `POST /missions` + `GET /run-mission/{id}/stream` so the BFF can return
+    a `mission_id` immediately and let the consumer attach separately.
     """
     mission_id = await run_url_mission(user=user, url=url)
+    return _stream_response(mission_id, last_event_id=last_event_id)
 
+
+@router.post("/missions", status_code=status.HTTP_201_CREATED)
+@limiter.limit("60/minute")
+async def post_mission(
+    request: Request,  # noqa: ARG001 — slowapi keys off the `request` parameter
+    user: RequireUser,
+    body: _StartMissionRequest,
+) -> _StartMissionResponse:
+    """Start a mission and return immediately with its id. The runner spawns
+    the agent loop on a detached task; the caller picks up SSE on
+    `/run-mission/{mission_id}/stream`.
+    """
+    mission_id = await start_url_mission(user=user, url=body.url)
+    return _StartMissionResponse(mission_id=mission_id)
+
+
+@router.get("/missions")
+@limiter.limit("60/minute")
+async def list_missions(
+    request: Request,  # noqa: ARG001 — slowapi keys off the `request` parameter
+    user: RequireUser,  # noqa: ARG001 — `RequireUser` binds the contextvar that scopes the repo query
+) -> _MissionListResponse:
+    """All missions owned by the current user, newest first. Used by the web
+    sidebar to group by status.
+    """
+    rows = await _missions.list_all()
+    return _MissionListResponse(missions=[_MissionResponse.from_row(row) for row in rows])
+
+
+@router.get("/missions/{mission_id}")
+@limiter.limit("60/minute")
+async def get_mission(
+    request: Request,  # noqa: ARG001 — slowapi keys off the `request` parameter
+    user: RequireUser,  # noqa: ARG001 — `RequireUser` binds the contextvar that scopes the repo query
+    mission_id: uuid.UUID = Path(...),
+) -> _MissionResponse:
+    """Single mission detail. RLS hides cross-tenant rows, so a not-owned id
+    returns 404 — same shape a non-existent id returns. The application layer
+    does not branch on ownership vs. existence to keep enumeration cheap.
+    """
+    row = await _missions.get(mission_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "mission not found")
+    return _MissionResponse.from_row(row)
+
+
+@router.get("/run-mission/{mission_id}/stream")
+@limiter.limit("60/minute")
+async def stream_mission(
+    request: Request,  # noqa: ARG001 — slowapi keys off the `request` parameter
+    user: RequireUser,  # noqa: ARG001 — `RequireUser` binds the contextvar that scopes the repo query
+    mission_id: uuid.UUID = Path(...),
+    last_event_id: int | None = Header(default=None, alias="Last-Event-ID"),
+) -> StreamingResponse:
+    """Attach an SSE consumer to a mission already started by `POST /missions`.
+
+    Ownership is verified at the application layer before the stream opens so
+    a cross-tenant attempt returns 404 immediately rather than draining the
+    rate budget on a hung connection. RLS still back-stops every repo call,
+    but the explicit lookup gives a fast-path 404.
+    """
+    if await _missions.get(mission_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "mission not found")
+    return _stream_response(mission_id, last_event_id=last_event_id)
+
+
+def _stream_response(mission_id: uuid.UUID, *, last_event_id: int | None) -> StreamingResponse:
     async def _gen() -> Any:
         async with emitter.stream(mission_id, last_event_id=last_event_id) as iterator:
             async for chunk in iterator:

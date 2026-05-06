@@ -170,3 +170,62 @@ async def test_run_mission_persists_full_markdown(
     assert task.status == Status.SUCCEEDED
     assert task.parsed_markdown == _FIXTURE_MARKDOWN
     assert task.latency_ms == 42
+
+
+@pytest.mark.asyncio
+async def test_post_missions_returns_id_quickly(client: TestClient) -> None:
+    """POST /missions returns a JSON body containing `mission_id` so the BFF
+    can pass it to a separate SSE consumer. The detached task may still be
+    running when this endpoint returns; the ring buffer covers that race.
+    """
+    response = client.post(
+        "/missions",
+        json={"url": _FIXTURE_URL},
+        headers={"Authorization": "Bearer fake"},
+    )
+    assert response.status_code == 201, response.text
+    assert response.headers["content-type"].startswith("application/json")
+    body = response.json()
+    assert "mission_id" in body
+    # UUID round-trip should not raise
+    import uuid
+
+    uuid.UUID(body["mission_id"])
+
+
+@pytest.mark.asyncio
+async def test_stream_endpoint_replays_terminal(client: TestClient) -> None:
+    """`GET /run-mission/{id}/stream` attaches to a mission already started
+    by `POST /missions`. The 200-event ring buffer replays `task_start →
+    task_end → done` whether the consumer attaches before or after the
+    detached task finishes.
+    """
+    start = client.post(
+        "/missions",
+        json={"url": _FIXTURE_URL},
+        headers={"Authorization": "Bearer fake"},
+    )
+    mission_id = start.json()["mission_id"]
+
+    response = client.get(
+        f"/run-mission/{mission_id}/stream",
+        headers={"Authorization": "Bearer fake"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"].startswith("text/event-stream")
+
+    events = _parse_sse(response.text)
+    types = [event["type"] for event in events]
+    assert types == ["task_start", "task_end", "done"]
+
+
+@pytest.mark.asyncio
+async def test_stream_endpoint_404_for_unknown_mission(client: TestClient) -> None:
+    """A mission id the current user does not own (or that does not exist)
+    returns 404 fast — no streaming response opened.
+    """
+    response = client.get(
+        "/run-mission/00000000-0000-0000-0000-000000000000/stream",
+        headers={"Authorization": "Bearer fake"},
+    )
+    assert response.status_code == 404
