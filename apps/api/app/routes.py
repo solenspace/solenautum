@@ -2,17 +2,17 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Header, HTTPException, Path, Query, Request, status
+from fastapi import APIRouter, Header, HTTPException, Path, Request, status
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints
 from svix.webhooks import Webhook, WebhookVerificationError
 
 from app.config import settings
 from app.persistence.models import Mission, MissionMode, Status
 from app.persistence.repository import MissionRepository, UserRepository
-from app.runner import run_url_mission, start_url_mission
+from app.runner import start_url_mission
 from app.security import RequireUser, limiter
 from app.sse import emitter
 
@@ -20,9 +20,20 @@ router = APIRouter()
 _users = UserRepository()
 _missions = MissionRepository()
 
+_MAX_URLS_PER_MISSION = 20
+
+
+_MissionUrl = Annotated[str, StringConstraints(min_length=1, max_length=2048)]
+
 
 class _StartMissionRequest(BaseModel):
-    url: str = Field(min_length=1, max_length=2048)
+    """Spec 10: callers always pass a list (1-20 URLs). Single-URL
+    submissions wrap a one-element array; the BFF translates the web
+    form for us. Per-URL `max_length=2048` preserves the bound from the
+    Spec 08 single-URL shape.
+    """
+
+    urls: list[_MissionUrl] = Field(min_length=1, max_length=_MAX_URLS_PER_MISSION)
 
 
 class _MissionResponse(BaseModel):
@@ -116,24 +127,6 @@ async def clerk_webhook(request: Request) -> None:
         await _users.delete(user_id=user_id)
 
 
-@router.get("/run-mission")
-@limiter.limit("60/minute")
-async def run_mission(
-    request: Request,  # noqa: ARG001 — slowapi keys off the `request` parameter
-    user: RequireUser,
-    url: str = Query(..., min_length=1, max_length=2048),
-    last_event_id: int | None = Header(default=None, alias="Last-Event-ID"),
-) -> StreamingResponse:
-    """Legacy single-task mission entry point. Awaits the mission inline so the
-    response body carries the full event sequence in one pass — used by Spec
-    07's hermetic test fixture and a backwards-compatible client. New clients
-    use `POST /missions` + `GET /run-mission/{id}/stream` so the BFF can return
-    a `mission_id` immediately and let the consumer attach separately.
-    """
-    mission_id = await run_url_mission(user=user, url=url)
-    return _stream_response(mission_id, last_event_id=last_event_id)
-
-
 @router.post("/missions", status_code=status.HTTP_201_CREATED)
 @limiter.limit("60/minute")
 async def post_mission(
@@ -141,11 +134,12 @@ async def post_mission(
     user: RequireUser,
     body: _StartMissionRequest,
 ) -> _StartMissionResponse:
-    """Start a mission and return immediately with its id. The runner spawns
-    the agent loop on a detached task; the caller picks up SSE on
-    `/run-mission/{mission_id}/stream`.
+    """Start a mission with 1-20 URLs and return immediately with its id.
+
+    The runner is owned by the lifespan-scoped TaskGroup (invariant 3);
+    the caller picks up SSE on `/run-mission/{mission_id}/stream`.
     """
-    mission_id = await start_url_mission(user=user, url=body.url)
+    mission_id = await start_url_mission(user=user, urls=body.urls)
     return _StartMissionResponse(mission_id=mission_id)
 
 

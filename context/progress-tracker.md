@@ -11,8 +11,11 @@ resuming a session.
 
 ## Current Goal
 
-- Implementing `specs/10-taskgroup-runner.md` (TaskGroup runner +
-  per-mission browser semaphore; closes Spec 08's invariant-3 deviation).
+- Implementing `specs/11-multi-lane-rendering.md` next. Spec 10 shipped:
+  the runner now owns one `asyncio.TaskGroup` per mission, per-mission
+  ceilings (HTTP-20 / browser-3) layer over the global slots, the
+  cancellation mechanic is in place for Spec 14, and the Cmd+K
+  multi-URL slide-over composes 1–20 URLs.
 
 ## Completed
 
@@ -410,25 +413,105 @@ resuming a session.
   Vitest reports 30 passed (5 test files including the new
   `result-preview.test.tsx`).
 
+- **Spec 10 — concurrent-task-execution.** Single-URL agent became a
+  concurrent N-URL agent (1–20 URLs per mission). `apps/api/app/runner.py`
+  rewritten around a `MissionRunner` class that owns one
+  `asyncio.TaskGroup` per mission and spawns one `_run_task` coroutine
+  per URL; each coroutine runs `agent.run(url)` and emits its own
+  `task_start`/`task_end` events. Per-mission semaphores
+  (`MissionSemaphores.http=20`, `browser=3`) layer over Spec 09's
+  global ceilings via a stacked `async with self.http, _GLOBAL_HTTP`;
+  binding flows through `contextvars.ContextVar` so
+  `TaskGroup.create_task` propagates the mission scope to children
+  without changing tier-tool signatures. `apps/api/app/concurrency.py`
+  gains `MissionSemaphores`, `with_mission_semaphores`,
+  `current_mission_semaphores`. `apps/api/app/tools/http.py` now
+  acquires a layered HTTP slot (Spec 09 had no gate on the HTTP
+  tier); `tools/stealth.py` and `tools/dynamic.py` swap their direct
+  `browser_slot()` calls for the layered helper. The legacy
+  `_spawn_detached` + `_inflight_tasks` is gone — Spec 08's
+  invariant-3 deviation (Open Question 7) is closed. The lifespan
+  TaskGroup wired in `apps/api/app/main.py` adopts each `MissionRunner`
+  via `emitter.adopt_runner(...)`; `apps/api/app/sse.py` exposes
+  `bind_lifespan_tg()` and `adopt_runner()`, and a `_RunnableMission`
+  Protocol avoids the runner→sse→runner import cycle. Runner errors
+  are wrapped in `_shielded_run` so a single mission failure does not
+  abort the lifespan group. Cancellation mechanic: `MissionRunner.
+  request_cancellation()` flips an `asyncio.Event`; tasks observe at
+  entry and bail with `Status.CANCELLED`; mid-flight `CancelledError`
+  emits a `task_end:cancelled` before re-raising (invariant 5).
+  `apps/api/app/runner_helpers.py` renames `_last_ok_tool_call` →
+  `last_ok_tool_call` (now a public helper) and adds
+  `compute_mission_status_from_db` (rolls task statuses up:
+  succeeded if all OK, failed if any failed, else cancelled) and
+  `emit_mission_terminal` (formats the mission `done` event).
+  `TaskRepository` adds `list_by_mission` (ownership-scoped via the
+  Task→Mission join). `apps/api/app/observability.py::start_mission_trace`
+  becomes `task_id`-optional — multi-task missions don't carry one
+  task_id at the trace level. Routes: `POST /missions` body switches
+  to `urls: list[Annotated[str, StringConstraints(max_length=2048)]]`
+  with `Field(min_length=1, max_length=20)`; the legacy
+  `GET /run-mission?url=...` and `run_url_mission` are dropped (the
+  test fixtures migrated to `POST /missions` + `GET /run-mission/
+  {id}/stream`). Web side: new `apps/web/widgets/multi-url-slideover/`
+  composes 1–20 URLs in a Sheet (right side, sm:max-w-2xl) with a
+  `<textarea rows={12}>`, zod validation returning i18n keys
+  (`missionUrlsRequired`/`TooMany`/`Invalid`), Cmd+Enter submit, Esc
+  close. Mounted in `app/(app)/layout.tsx`; opened from the command
+  palette via a new `<CommandItem onSelect={openMultiUrl}>` with
+  shortcut `⌘⇧N` and `ListPlus` icon. `useMissionStore` gains
+  `multiUrlOpen`/`openMultiUrl`/`closeMultiUrl`; `useSubmitMission`
+  extracts `submitMany(urls)` (single-URL `submit` becomes a thin
+  wrapper). Seven new i18n keys: `mission.newMultiUrlMission`,
+  `multiUrlHelp`, `multiUrlPlaceholder`, `urlCount{,_one,_other}`,
+  `validation.missionUrls{Required,TooMany,Invalid}`. **Heartbeat
+  deviation from Section E** (greenlit before implementation): the
+  existing per-stream `asyncio.wait_for(timeout=_HEARTBEAT_INTERVAL_S)`
+  in `sse.py:120-122` is functionally complete; restructuring it into
+  a per-mission task that pushes pre-formatted bytes through the
+  queue (with a queue-type churn) was rejected in favor of keeping
+  the simpler design and adding `test_sse_heartbeat.py` to prove it.
+  Three new pytest files: `test_concurrency_layered.py` (HTTP-20 and
+  browser-3 caps + cancellation release + ContextVar propagation
+  through TaskGroup children), `test_runner_taskgroup.py`
+  (concurrency, cancellation-before-run, no-detached-tasks; 4 cases),
+  `test_sse_heartbeat.py` (heartbeat fires within patched interval +
+  heartbeats do not consume seq). Two existing route tests
+  (`test_run_mission_route.py`, `test_runner_error_propagation.py`)
+  migrated from the legacy GET to POST + GET stream and gained a
+  `_FakeChain` so they no longer depend on `OPENROUTER_API_KEY`/
+  `GROQ_API_KEY`. Two new web Vitest files: `multi-url-slideover.
+  test.tsx` (6 cases including pluralization), and additions to
+  `use-submit-mission.test.tsx` covering `submitMany`. **Verification
+  gate**: `pnpm typecheck` exits 0; `pnpm lint` exits 0; pytest 70
+  passed / 19 skipped; Vitest 39 passed across 6 files; `pnpm build`
+  exits 0; `grep -n "asyncio.create_task" apps/api/app/runner.py`
+  is empty; `grep -rn "TODO(spec-10)" apps packages` is empty. Open
+  Question 7 closed; Open Question 1 marked resolved (mechanic
+  shipped, user-facing endpoint deferred to Spec 14).
+
 ## In Progress
 
-- `specs/10-taskgroup-runner.md` — to begin next session. Closes
-  Spec 08's invariant-3 deviation (`_spawn_detached` →
-  `TaskGroup.create_task`) and adds per-mission HTTP/browser
-  semaphores (HTTP 20, browser 3) on top of Spec 09's global
-  ceilings.
+- `specs/11-multi-lane-rendering.md` — next session. Spec 11 lifts
+  Spec 08's single-mission lane into a stack-of-lanes UI rendering N
+  per-task lanes for the multi-URL missions Spec 10 enables.
 
 ## Next Up
 
-- Implement `specs/10-taskgroup-runner.md`. The remaining specs
+- Implement `specs/11-multi-lane-rendering.md`. The remaining specs
   follow in numbered order; each spec's `Done when` checklist
   gates progress to the next.
 
 ## Open Questions
 
-1. **Mission cancellation semantics.** Working assumption: pending
-   tasks cancel, in-flight tasks finish (least surprising). Document
-   and confirm in `specs/14-cost-and-mission-lifecycle.md`.
+1. **Mission cancellation semantics — RESOLVED in Spec 10.**
+   `MissionRunner.request_cancellation()` sets an `asyncio.Event`;
+   tasks not yet started observe at entry and settle as `CANCELLED`;
+   in-flight tasks finish naturally; `CancelledError` (when Spec 14
+   plumbs `task.cancel()`) emits a `task_end:cancelled` then
+   re-raises. The user-facing `DELETE /missions/{id}` endpoint plus
+   the cost-cap reaper are deferred to
+   `specs/14-cost-and-mission-lifecycle.md`.
 2. **Tavily vs Exa for discovery.** Tavily is the user-confirmed
    primary; the 2026 audit favors Exa for embeddings-first agent
    search. Both have free tiers. Revisit after
@@ -458,14 +541,11 @@ resuming a session.
    Spec 13 (adaptive selectors) replaces with `INSERT ... ON CONFLICT
    DO UPDATE` to close the window. No-op until then because Spec 05
    ships zero concurrent selector writers.
-7. **Spec 10 must close `runner._spawn_detached` invariant-3
-   deviation.** `apps/api/app/runner.py::_spawn_detached` uses
-   `asyncio.create_task` outside a TaskGroup with a `# TODO(spec-10)`
-   marker. The detached task is held alive by `_inflight_tasks` set
-   + `add_done_callback(discard)` to avoid GC, but ownership is not
-   structured. Spec 10 replaces with `TaskGroup.create_task` and
-   call sites stay unchanged. The `scrape-pipeline-doctor` review of
-   Spec 10 fails until this lands.
+7. **Spec 08 invariant-3 deviation — CLOSED in Spec 10.**
+   `_spawn_detached` and the `_inflight_tasks` set are gone;
+   `MissionRunner` owns one `asyncio.TaskGroup` per mission and the
+   FastAPI lifespan owns the outer group that adopts each runner.
+   `grep -n "asyncio.create_task" apps/api/app/runner.py` is empty.
 8. **Spec 08 verification deferred to human reviewer.** Two
    verification items in `specs/08-web-shell-and-stream-consumer.md`
    require a real Clerk dev instance + browser run and are not
@@ -1034,3 +1114,43 @@ RLS policy migration and verify cross-tenant isolation test."
   Vitest 30 passed (5 test files including the new
   `widgets/task-lane-card/result-preview.test.tsx` with 9 cases).
   Next: Spec 10.
+- 2026-05-06: Spec 10 shipped on
+  `feature/spec-10-concurrent-task-execution`. Five things worth
+  recording: (1) **Heartbeat deviation from Section E.** `sse.py:120-122`
+  already emits `b": heartbeat\n\n"` via a per-stream
+  `asyncio.wait_for(timeout=15)` — restructuring it into a per-mission
+  asyncio task that pushes pre-formatted bytes through the queue
+  (with the queue-type churn from `tuple[seq,payload]|None` to
+  `bytes|None`) was rejected as needless churn after the user
+  greenlit the simpler path. The intent ("heartbeats every 15s so
+  proxies don't kill idle SSE streams") is met; `test_sse_heartbeat.py`
+  monkeypatches the interval down to 0.05s and proves it. (2) **Legacy
+  `GET /run-mission?url=...` retired** (user-greenlit). The two existing
+  tests (`test_run_mission_route.py`, `test_runner_error_propagation.py`)
+  migrated to `POST /missions` + `GET /run-mission/{id}/stream`; the
+  ring buffer covers the race between POST returning and the stream
+  attaching. Both tests gained a `_FakeChain` so they no longer
+  depend on `OPENROUTER_API_KEY`/`GROQ_API_KEY`. (3) **`_RunnableMission`
+  Protocol** breaks the runner→sse→runner import cycle: the emitter
+  needs only `runner.run() -> Awaitable[None]`, so a structural type
+  with that one method lets `adopt_runner` accept a `MissionRunner`
+  without importing it. Spec's literal pseudocode (`async def
+  adopt(self, mission_id, runner: "MissionRunner")` with private
+  `_tg` mutation from the lifespan) replaced with a clean
+  `bind_lifespan_tg(tg)` method + `_shielded_run` wrapper so an
+  unhandled mission error logs and continues instead of poisoning
+  the lifespan TaskGroup. (4) **Observability tweak**:
+  `start_mission_trace`'s `task_id` parameter became optional —
+  multi-task missions don't carry one task_id at the trace level
+  (per-task spans inherit the trace; `@observe`-decorated tools
+  carry their own `task_id` through `MissionDeps`). (5) **`getByLabelText`
+  in the slide-over test** found two matches because the
+  `<SheetTitle>` ("New multi-URL mission") and the textarea's
+  `aria-label="New multi-URL mission"` both expose the same
+  accessible name; switched to `getByRole("textbox")` which is
+  unique. **Verification gate**: `turbo run lint typecheck test
+  build` exits 0; pytest 70 passed / 19 skipped; Vitest 39 passed
+  across 6 test files; `grep -n "asyncio.create_task"
+  apps/api/app/runner.py` is empty; `grep -rn "TODO(spec-10)" apps
+  packages` is empty. Open Questions 1 and 7 closed in this commit.
+  Next: Spec 11.

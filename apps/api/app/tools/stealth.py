@@ -17,7 +17,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 from scrapling.fetchers import StealthyFetcher
 
-from app.concurrency import browser_slot
+from app.concurrency import current_mission_semaphores
 from app.extract import MarkdownExtractor
 from app.observability import observe
 from app.persistence.snapshot import persist_snapshot
@@ -70,7 +70,7 @@ async def scrape_stealth(deps: StealthDeps, args: StealthScrapeArgs) -> StealthS
 
     start = perf_counter()
 
-    async with browser_slot():  # invariant 2
+    async with current_mission_semaphores().browser_slot():  # invariant 2 (layered)
         page = await StealthyFetcher.async_fetch(
             args.url,
             headless=True,

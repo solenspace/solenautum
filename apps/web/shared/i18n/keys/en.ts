@@ -25,6 +25,12 @@ export const EN = {
     urlPlaceholder: "Paste a URL — ⌘↩ to run",
     yourMissions: "Your missions",
     newMission: "New URL mission",
+    newMultiUrlMission: "New multi-URL mission",
+    multiUrlHelp: "One URL per line. 1 to 20 URLs.",
+    multiUrlPlaceholder: "https://...\nhttps://...",
+    urlCount: "URLs",
+    urlCount_one: "URL",
+    urlCount_other: "URLs",
     toggleReasoning: "Toggle reasoning",
     loading: "Loading…",
     noMissions: "No missions yet",
@@ -46,6 +52,9 @@ export const EN = {
     urlTooLong: "URL too long",
     urlInvalid: "URL invalid",
     missionFailed: "Mission failed",
+    missionUrlsRequired: "Add at least one URL",
+    missionUrlsTooMany: "Maximum 20 URLs per mission",
+    missionUrlsInvalid: "One or more URLs are invalid",
   },
 } as const;
 

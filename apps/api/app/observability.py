@@ -33,24 +33,35 @@ _client = _build_client()
 
 
 def start_mission_trace(  # type: ignore[no-any-unimported]
-    *, mission_id: UUID, task_id: UUID, user_id: str, prompt: str
+    *,
+    mission_id: UUID,
+    user_id: str,
+    prompt: str,
+    task_id: UUID | None = None,
 ) -> StatefulTraceClient:
-    """Open one Langfuse trace per mission. `mission_id` and `task_id` land
-    on the trace metadata (per `code-standards.md` observability rule) so a
-    Langfuse search by either id surfaces the full execution. Tools attach as
-    nested spans via the `@observe()` decorator; the runner calls
-    `.update(output=...)` on the returned handle when the mission terminates.
+    """Open one Langfuse trace per mission. `mission_id` and (optionally)
+    `task_id` land on the trace metadata (per `code-standards.md`
+    observability rule) so a Langfuse search by either id surfaces the
+    full execution. Tools attach as nested spans via the `@observe()`
+    decorator; the runner calls `.update(output=...)` on the returned
+    handle when the mission terminates.
+
+    Multi-task missions (Spec 10) leave `task_id` unset at the trace
+    level — per-task spans inherit the trace and carry their own
+    `task_id` via `@observe`-decorated tool calls.
     """
+    metadata: dict[str, Any] = {
+        "mission_id": str(mission_id),
+        "user_id": user_id,
+    }
+    if task_id is not None:
+        metadata["task_id"] = str(task_id)
     return _client.trace(
         name="mission",
         id=str(mission_id),
         user_id=user_id,
         input=prompt,
-        metadata={
-            "mission_id": str(mission_id),
-            "task_id": str(task_id),
-            "user_id": user_id,
-        },
+        metadata=metadata,
     )
 
 

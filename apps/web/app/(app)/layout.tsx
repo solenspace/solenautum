@@ -5,6 +5,7 @@ import { SidebarProvider } from "@/components/ui/sidebar";
 import { KeyboardShortcuts } from "@/shared/keyboard";
 import { CommandPalette } from "@/widgets/command-palette";
 import { MissionSidebar } from "@/widgets/mission-sidebar";
+import { MultiUrlSlideover } from "@/widgets/multi-url-slideover";
 import { TopBar } from "@/widgets/top-bar";
 
 /**
@@ -30,6 +31,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
           <main className="flex-1 overflow-auto">{children}</main>
         </div>
         <CommandPalette />
+        <MultiUrlSlideover />
         <KeyboardShortcuts />
       </div>
     </SidebarProvider>
