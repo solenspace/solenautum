@@ -11,11 +11,14 @@ resuming a session.
 
 ## Current Goal
 
-- Implementing `specs/11-multi-lane-rendering.md` next. Spec 10 shipped:
-  the runner now owns one `asyncio.TaskGroup` per mission, per-mission
-  ceilings (HTTP-20 / browser-3) layer over the global slots, the
-  cancellation mechanic is in place for Spec 14, and the Cmd+K
-  multi-URL slide-over composes 1–20 URLs.
+- Implementing `specs/12-url-discovery-tavily.md` next. Spec 11 shipped:
+  the slide-over now renders the multi-lane stack with sticky aggregate
+  header (done / streaming / errored / elapsed), J/K lane navigation
+  with auto-expand, Enter/x pin/unpin, 1.5s succeeded auto-collapse, the
+  three-mode reasoning renderer (focused / tail / `…thinking` after 5s
+  idle), inline error chips, and a mobile single-lane swipe view with
+  status-dot strip. Mission-level `aria-live="polite"` covers milestone
+  announcements only; lane bodies stay `aria-live="off"`.
 
 ## Completed
 
@@ -490,15 +493,81 @@ resuming a session.
   Question 7 closed; Open Question 1 marked resolved (mechanic
   shipped, user-facing endpoint deferred to Spec 14).
 
+- **Spec 11 — multi-lane-web-ui.** Spec 08's single `TaskLaneCard`
+  retired; the slide-over now renders `apps/web/widgets/task-lane-stack/`
+  — a sticky four-field aggregate header (`{succeeded}/{total} done`,
+  `{running} streaming`, `{failed} errored`, mm:ss `elapsed`) plus a
+  vertical stack of `TaskLaneRow`s. **Three new hooks** under
+  `apps/web/features/run-mission/`: `useTaskLanes` projects
+  `useMissionStream`'s events into per-task lanes via a `useMemo` on
+  `events`, with per-task `startedAt` / `lastTokenAt` / `finishedAt`
+  held in a sibling `useRef<Map>` *outside* the memo (a fresh
+  `Date.now()` inside the loop would shift these forward on every
+  re-projection — the spec pseudocode's drift bug; the timestamps
+  advance only when first-seen or when a per-task token count grows);
+  `useLaneFocus` owns the J/K index + Enter-pin set with wrap and
+  index-clamping when lanes shrink; `useMissionSummary` aggregates
+  counts and drives a 500ms elapsed clock that freezes once every
+  lane is terminal. **Lane row** uses data-attribute styling
+  (`data-focused`, `data-status`, `data-user-expanded`,
+  `data-expanded`) and a `setTimeout`-driven re-render at the 1.5s
+  auto-collapse boundary; expansion priority is focus → pin →
+  pending/running → failed/cancelled → succeeded-within-1.5s. **Three-
+  mode reasoning** in `reasoning-stream.tsx`: focused = full text,
+  unfocused-active = last 80 chars (`line-clamp-1 truncate`),
+  unfocused-idle (≥ 5s since `lastTokenAt`) = `…thinking` chip; a 1s
+  internal interval drives the threshold. **InlineErrorChip extracted**
+  out of Spec 09's `result-preview.tsx` into its own file with a
+  cleaner `{ code, message, detectedProtections? }` prop bag (no more
+  synthetic SseError construction in callers); `result-preview.tsx`
+  trims to a `{ preview }` string prop. **Mobile breakpoint (< 768px)**
+  via the existing `useIsMobile()` hook: stack collapses to a single
+  visible focused lane, `react-swipeable`'s `useSwipeable` maps
+  swipe-left/right to `focus.next/previous`, and a strip in the
+  aggregate header shows `{focusIndex+1}/{total}` plus a row of small
+  status dots (one per lane). **ARIA**: a single `role="status"
+  aria-live="polite"` region on the slide-over root carries milestone
+  announcements only — mission start (once), per-lane terminal,
+  mission complete, mission-level error; lane bodies set
+  `aria-live="off"` so screen readers read content on demand. Eleven
+  user-facing keys plus two plural pairs added to the `mission`
+  namespace (`headerDone{,_one,_other}`, `headerStreaming`,
+  `headerErrored`, `headerElapsed`, `reconnecting`, `connecting`,
+  `ariaMissionRegion`, `ariaMissionStarted{,_one,_other}`,
+  `ariaLaneTerminal`, `ariaMissionComplete`, `ariaMissionFailed`).
+  **Page-level wiring** updated `apps/web/app/(app)/missions/page.tsx`
+  to render `TaskLaneStack`; the slide-over widget is unchanged
+  (composition stays at the page layer per FSD). The
+  `apps/web/widgets/task-lane-card/` directory was deleted; the
+  carry-overs (`tier-badge.tsx`, `result-preview.tsx`, the new
+  `inline-error-chip.tsx`) live under
+  `apps/web/widgets/task-lane-stack/`. Eight new test files: three
+  hook tests (`use-task-lanes.test.ts` 7 cases — projection, ordering,
+  tool pairing, error capture, startedAt stability;
+  `use-lane-focus.test.ts` 8 cases — wrap, pin/unpin, clamp;
+  `use-mission-summary.test.ts` 5 cases — counts, ticking, freeze) and
+  five widget tests (`reasoning-stream.test.tsx` 5 cases for the three
+  modes + transition; `aggregate-header.test.tsx` 4 cases;
+  `task-lane-row.test.tsx` 7 cases including the 1.5s auto-collapse;
+  `inline-error-chip.test.tsx` 6 cases ported from Spec 09's
+  result-preview test; `result-preview.test.tsx` 3 cases;
+  `task-lane-stack.test.tsx` 9 cases — desktop/mobile end-to-end with
+  mocked `useMissionStream` + `useIsMobile`). **Verification gate**:
+  `turbo run typecheck` exits 0; `turbo run lint` exits 0 (Biome a11y
+  rules pass); `turbo run build` exits 0; web Vitest 84 passed across
+  14 files; `git ls-files apps/web/widgets/task-lane-card` returns
+  empty.
+
 ## In Progress
 
-- `specs/11-multi-lane-rendering.md` — next session. Spec 11 lifts
-  Spec 08's single-mission lane into a stack-of-lanes UI rendering N
-  per-task lanes for the multi-URL missions Spec 10 enables.
+- `specs/12-url-discovery-tavily.md` — next session. Spec 12 introduces
+  the description-mode mission flow (Tavily-backed URL discovery + the
+  user-approval gate); discovered URLs feed into Spec 11's existing
+  lane stack once tasks start.
 
 ## Next Up
 
-- Implement `specs/11-multi-lane-rendering.md`. The remaining specs
+- Implement `specs/12-url-discovery-tavily.md`. The remaining specs
   follow in numbered order; each spec's `Done when` checklist
   gates progress to the next.
 
@@ -1154,3 +1223,49 @@ RLS policy migration and verify cross-tenant isolation test."
   apps/api/app/runner.py` is empty; `grep -rn "TODO(spec-10)" apps
   packages` is empty. Open Questions 1 and 7 closed in this commit.
   Next: Spec 11.
+- 2026-05-06: Spec 11 shipped on
+  `feature/spec-11-multi-lane-web-ui`. Six things worth recording:
+  (1) **Timestamp drift bug in spec pseudocode.** Section C of
+  `specs/11-multi-lane-web-ui.md` stamps `lane.startedAt = Date.now()`
+  and `lane.lastTokenAt = Date.now()` inside the projection — but the
+  projection is a `useMemo` that rebuilds from scratch on every events
+  change. A fresh `Date.now()` inside the loop shifts these forward
+  on every event, breaking the 5s-idle reasoning collapse and the
+  elapsed clock. Fix: per-task timestamps live in a sibling
+  `useRef<Map<taskId, { startedAt; tokenCount; lastTokenAt;
+  finishedAt? }>>` outside the memo; `startedAt` stamps once,
+  `lastTokenAt` advances only when the per-task token count grows
+  past the recorded count, `finishedAt` stamps on the first terminal
+  event for that task. (2) **`MissionDetailSlideover` is renderBody-
+  composition, not a direct importer.** Spec §N showed the slide-over
+  importing `TaskLaneStack` directly — that crosses the FSD widget-
+  to-widget boundary. Real fix: edit
+  `apps/web/app/(app)/missions/page.tsx` (the page is allowed to
+  compose widgets); the slide-over file is untouched. (3)
+  **Tailwind tokens in the spec don't match `globals.css`.** Spec
+  used `bg-accent-primary` and `bg-text-muted`; project tokens are
+  `bg-primary` and `bg-muted-foreground`. Substituted throughout.
+  (4) **`InlineErrorChip` didn't exist as its own file.** Spec §J
+  treated it as a Spec 09 carry-over but the chip was inlined in
+  `result-preview.tsx`. Extracted into
+  `widgets/task-lane-stack/inline-error-chip.tsx` with a clean
+  `{ code, message, detectedProtections? }` prop bag — avoids
+  callers having to construct synthetic `SseError` objects. (5)
+  **Biome lint nits.** Internal helper named `_useMissionAnnouncements`
+  triggered `useHookAtTopLevel` (Biome required the canonical `use…`
+  prefix without the underscore); `aria-relevant` on a role-less div
+  triggered `useAriaPropsSupportedByRole` — both fixed by renaming and
+  by adding `role="status"` to the announcement region. The
+  `…thinking` span's `aria-label` switched to `title` since
+  `aria-label` on a span trips the same rule. (6) **Lane-terminal
+  vs mission-complete announcement collision.** Both run in the
+  same effect cycle and a polite live region overwrites; the
+  per-lane terminal announcement disappears at the moment the
+  mission completes. Acceptable for now: the mission-complete text
+  is the right thing for the user to hear at the end. The
+  per-lane announcement stays observable when the mission has more
+  than one lane and at least one is still running. **Verification
+  gate**: `turbo run typecheck` exits 0; `turbo run lint` exits 0;
+  `turbo run build` exits 0; web Vitest 84 passed across 14 test
+  files; `git ls-files apps/web/widgets/task-lane-card` returns
+  empty. Next: Spec 12.
