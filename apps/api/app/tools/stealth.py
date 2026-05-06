@@ -1,8 +1,11 @@
-"""HTTP tier — Scrapling `AsyncFetcher` + Crawl4AI markdown extraction.
+"""Stealth tier — Camoufox via Scrapling's `StealthyFetcher`.
 
-Returns `HttpScrapeOk | HttpScrapeFailure`. Reasons drive the agent's
-escalation contract; see `agent.py`'s system prompt. `http_slot()` is
-not acquired here — Spec 10 wires it.
+Invariant 2: every browser session opens inside `browser_slot()`.
+
+Spec 09 deviation #1: the spec assumes Scrapling 0.3+'s
+`AsyncStealthySession` async-context-manager API. The pinned 0.2.99
+release exposes only the class-method `StealthyFetcher.async_fetch(...)`.
+Same Response shape; same WAF-routing logic.
 """
 
 from __future__ import annotations
@@ -12,8 +15,9 @@ from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field
-from scrapling.fetchers import AsyncFetcher
+from scrapling.fetchers import StealthyFetcher
 
+from app.concurrency import browser_slot
 from app.extract import MarkdownExtractor
 from app.observability import observe
 from app.persistence.snapshot import persist_snapshot
@@ -23,13 +27,11 @@ from app.tools._waf import TERMINAL_WAFS, body_excerpt, detect_waf
 _extractor = MarkdownExtractor()
 
 
-class HttpScrapeArgs(BaseModel):
-    """Tool input. The Pydantic AI agent fills this from its tool call."""
-
+class StealthScrapeArgs(BaseModel):
     url: str = Field(..., max_length=2048)
 
 
-class HttpScrapeOk(BaseModel):
+class StealthScrapeOk(BaseModel):
     status: Literal["ok"] = "ok"
     url: str
     markdown: str
@@ -38,10 +40,9 @@ class HttpScrapeOk(BaseModel):
     latency_ms: int
 
 
-class HttpScrapeFailure(BaseModel):
+class StealthScrapeFailure(BaseModel):
     status: Literal["failed"] = "failed"
     reason: Literal[
-        "protected_cloudflare",
         "site_not_supported",
         "javascript_required",
         "upstream_error",
@@ -51,62 +52,57 @@ class HttpScrapeFailure(BaseModel):
     latency_ms: int
 
 
-HttpScrapeResult = HttpScrapeOk | HttpScrapeFailure
+StealthScrapeResult = StealthScrapeOk | StealthScrapeFailure
 
 
-class HttpToolDeps(BaseModel):
-    """Mission-scoped dependencies passed via Pydantic AI's `RunContext`.
-
-    `user_id` / `mission_id` / `task_id` thread through to
-    `persist_snapshot` so the snapshot key is uniformly scoped.
-    """
-
+class StealthDeps(BaseModel):
     user_id: str
     mission_id: UUID
     task_id: UUID
     robots_override: bool = False
 
 
-@observe(name="tool.scrape_http")  # type: ignore[untyped-decorator]
-async def scrape_http(deps: HttpToolDeps, args: HttpScrapeArgs) -> HttpScrapeResult:
-    """Fetch a URL via Scrapling's `AsyncFetcher` and pipe the bytes through
-    Crawl4AI for markdown extraction. Honors invariants 1, 6, 9, 11.
-    """
-    assert_safe_url(args.url)  # invariant 1 — SSRF guard before any egress
-    await assert_robots_allows(  # invariant 11 — robots.txt unless overridden
-        args.url, robots_override=deps.robots_override
-    )
+@observe(name="tool.scrape_stealth")  # type: ignore[untyped-decorator]
+async def scrape_stealth(deps: StealthDeps, args: StealthScrapeArgs) -> StealthScrapeResult:
+    """Fetch with the Camoufox stealth browser. Honors invariants 1, 2, 9, 11."""
+    assert_safe_url(args.url)  # invariant 1
+    await assert_robots_allows(args.url, robots_override=deps.robots_override)  # invariant 11
 
     start = perf_counter()
-    page = await AsyncFetcher.get(
-        args.url,
-        stealthy_headers=True,
-        follow_redirects=True,
-        timeout=15,
-    )
+
+    async with browser_slot():  # invariant 2
+        page = await StealthyFetcher.async_fetch(
+            args.url,
+            headless=True,
+            network_idle=True,
+            humanize=True,
+        )
+
     latency_ms = int((perf_counter() - start) * 1000)
 
     if page.status == 404:
-        return HttpScrapeFailure(reason="not_found", latency_ms=latency_ms)
+        return StealthScrapeFailure(reason="not_found", latency_ms=latency_ms)
     if page.status >= 400:
         waf = detect_waf(
             status=page.status,
             headers=dict(page.headers),
             body_excerpt=body_excerpt(page.body),
         )
-        if waf == "cloudflare":
-            return HttpScrapeFailure(
-                reason="protected_cloudflare",
-                detected_protections=["cloudflare"],
-                latency_ms=latency_ms,
-            )
         if waf in TERMINAL_WAFS:
-            return HttpScrapeFailure(
+            return StealthScrapeFailure(
                 reason="site_not_supported",
                 detected_protections=[waf],
                 latency_ms=latency_ms,
             )
-        return HttpScrapeFailure(reason="upstream_error", latency_ms=latency_ms)
+        if waf == "cloudflare":
+            # Camoufox's bypass did not clear the challenge — likely a
+            # JS-challenge variant. Escalate to the dynamic tier.
+            return StealthScrapeFailure(
+                reason="javascript_required",
+                detected_protections=["cloudflare"],
+                latency_ms=latency_ms,
+            )
+        return StealthScrapeFailure(reason="upstream_error", latency_ms=latency_ms)
 
     extracted = await _extractor.extract(html=str(page.body), source_url=str(page.url))
     snapshot_key, snapshot_truncated = await persist_snapshot(
@@ -116,7 +112,7 @@ async def scrape_http(deps: HttpToolDeps, args: HttpScrapeArgs) -> HttpScrapeRes
         raw_html=extracted.raw_html,
     )
 
-    return HttpScrapeOk(
+    return StealthScrapeOk(
         url=str(page.url),
         markdown=extracted.markdown,
         snapshot_key=snapshot_key,
