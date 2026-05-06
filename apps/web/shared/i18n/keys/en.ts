@@ -35,6 +35,11 @@ export const EN = {
     status_succeeded: "Done",
     status_failed: "Failed",
     status_cancelled: "Cancelled",
+    errorSiteNotSupported:
+      "This site uses {protections}. Out of scope for now — try a different URL.",
+    errorNotFound: "Page not found at this URL.",
+    errorRenderTimeout: "Page took too long to render.",
+    errorUpstream: "Upstream returned an error.",
   },
   validation: {
     urlRequired: "URL required",

@@ -1,6 +1,6 @@
 "use client";
 
-import type { SseEvent, TaskEnd } from "@autumn/sse-protocol";
+import type { SseError, SseEvent, TaskEnd } from "@autumn/sse-protocol";
 import { useMemo } from "react";
 
 import { useMissionStream } from "@/features/run-mission";
@@ -18,6 +18,7 @@ interface Projection {
   url: string | null;
   toolCalls: ToolCall[];
   taskEnd: TaskEnd | null;
+  errors: SseError[];
 }
 
 /**
@@ -28,11 +29,15 @@ interface Projection {
  *   - reasoning (`token` events)        — dim, batched
  *   - tool chips (`tool_start`/`_end`)  — neutral, expandable
  *   - result preview (`task_end`)        — high contrast
+ *
+ * Spec 09 — `error` events with a typed `code` (e.g. `site_not_supported`,
+ * `render_timeout`) are projected into `errors` and rendered as inline
+ * chips above the preview by `<ResultPreview>`.
  */
 export function TaskLaneCard({ missionId }: { missionId: string }) {
   const { events } = useMissionStream(missionId);
   const t = useT();
-  const { tier, url, toolCalls, taskEnd } = useMemo(() => _project(events), [events]);
+  const { tier, url, toolCalls, taskEnd, errors } = useMemo(() => _project(events), [events]);
 
   return (
     <div className="flex flex-col gap-3 p-4">
@@ -53,7 +58,7 @@ export function TaskLaneCard({ missionId }: { missionId: string }) {
         </div>
       ) : null}
 
-      {taskEnd ? <ResultPreview taskEnd={taskEnd} /> : null}
+      <ResultPreview taskEnd={taskEnd} errors={errors} />
     </div>
   );
 }
@@ -63,6 +68,7 @@ function _project(events: readonly SseEvent[]): Projection {
   let url: string | null = null;
   let taskEnd: TaskEnd | null = null;
   const calls = new Map<number, ToolCall>();
+  const errors: SseError[] = [];
   let firstTaskStartSeen = false;
 
   for (const event of events) {
@@ -92,8 +98,10 @@ function _project(events: readonly SseEvent[]): Projection {
       }
     } else if (event.type === "task_end" && taskEnd === null) {
       taskEnd = event;
+    } else if (event.type === "error") {
+      errors.push(event);
     }
   }
 
-  return { tier, url, taskEnd, toolCalls: [...calls.values()] };
+  return { tier, url, taskEnd, toolCalls: [...calls.values()], errors };
 }

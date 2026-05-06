@@ -4,10 +4,13 @@ mission/task row state in Postgres, and `tasks.parsed_markdown` matches the
 fixture.
 
 LLM and network are stubbed so the test runs hermetically:
-- `app.tools.http.scrape_http` is replaced with a deterministic fake result.
-- `app.agent.build_agent` is replaced with a fake agent whose `.run()` calls
-  the (stubbed) tool once and returns a MissionResult — exercising the
-  runner's closure-capture path and SSE pipeline without an LLM round trip.
+- `app.tools.http.scrape_http` is replaced with a deterministic fake
+  result that mirrors the real `HttpScrapeOk` shape (Spec 09 discriminated
+  union).
+- `app.runner.build_agent` is replaced with a fake agent whose `.run()`
+  calls the stubbed tool once and returns a `MissionResult(status="ok",
+  ...)` plus an `all_messages()` shape the runner can walk via
+  `_last_ok_tool_call`.
 
 DB-dependent assertions skip when `DATABASE_URL` is unset.
 """
@@ -16,20 +19,22 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
+from uuid import UUID
 
 import pytest
 import pytest_asyncio
 from fastapi.testclient import TestClient
+from pydantic_ai.messages import ModelRequest, ToolReturnPart
 
-from app.agent import MissionResult
+from app.agent import MissionDeps, MissionResult
 from app.config import settings
 from app.persistence.db import transaction
 from app.persistence.models import Status, Task
 from app.persistence.repository import UserRepository
 from app.security import CurrentUser, _current_user, require_user
-from app.tools.http import HttpScrapeArgs, HttpScrapeResult, HttpToolDeps
+from app.tools.http import HttpScrapeArgs, HttpScrapeOk, HttpToolDeps
 
 pytestmark = pytest.mark.skipif(
     settings.database_url is None,
@@ -40,29 +45,56 @@ pytestmark = pytest.mark.skipif(
 _FIXTURE_USER_ID = "user_test_route"
 _FIXTURE_URL = "https://example.com/"
 _FIXTURE_MARKDOWN = "# Hello Autumn\n\nThis is a Spec 07 fixture page.\n"
+_FIXTURE_SNAPSHOT_KEY = "user_test_route/fixture/snapshot.html.gz"
 
 
 @dataclass
 class _FakeAgentResult:
     output: MissionResult
+    messages: list[ModelRequest] = field(default_factory=list)
+
+    def all_messages(self) -> list[ModelRequest]:
+        return self.messages
 
 
 class _FakeAgent:
-    def __init__(self, last_scrape: list[HttpScrapeResult]) -> None:
-        self._last_scrape = last_scrape
+    """Stub `Agent` that calls the stubbed tier tool once and returns a
+    fake result whose `all_messages()` carries one `ToolReturnPart`
+    holding a real `HttpScrapeOk` — so `_last_ok_tool_call` recovers
+    the snapshot key, markdown, and latency exactly as it would in
+    production.
+    """
 
-    async def run(self, url: str, *, model: Any, deps: HttpToolDeps) -> _FakeAgentResult:
-        # Importing locally so the patch applied via fixture is in effect.
+    async def run(self, url: str, *, model: Any, deps: MissionDeps) -> _FakeAgentResult:
         from app.tools import http as http_tool
 
-        result = await http_tool.scrape_http(deps, HttpScrapeArgs(url=url))
-        self._last_scrape.append(result)
+        http_deps = HttpToolDeps(
+            user_id=deps.user_id,
+            mission_id=deps.mission_id,
+            task_id=deps.task_id,
+            robots_override=deps.robots_override,
+        )
+        tool_result = await http_tool.scrape_http(http_deps, HttpScrapeArgs(url=url))
+        # The real Pydantic AI builds these messages around each tool call;
+        # _last_ok_tool_call only reads `ToolReturnPart.content`, so a
+        # minimal one-message history is enough.
+        message = ModelRequest(
+            parts=[
+                ToolReturnPart(
+                    tool_name="scrape_http",
+                    content=tool_result,
+                    tool_call_id="call_1",
+                ),
+            ],
+        )
         return _FakeAgentResult(
             output=MissionResult(
+                status="ok",
                 summary="Fixture page parsed successfully.",
-                primary_url=result.url,
-                markdown_excerpt=result.markdown[:500],
+                primary_url=tool_result.url if tool_result.status == "ok" else url,
+                markdown_excerpt=(tool_result.markdown[:500] if tool_result.status == "ok" else ""),
             ),
+            messages=[message],
         )
 
 
@@ -79,17 +111,17 @@ async def seed_user(fake_user: CurrentUser) -> None:
 
 @pytest.fixture
 def patch_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _fake_scrape(deps: HttpToolDeps, args: HttpScrapeArgs) -> HttpScrapeResult:
-        return HttpScrapeResult(
+    async def _fake_scrape(deps: HttpToolDeps, args: HttpScrapeArgs) -> HttpScrapeOk:
+        return HttpScrapeOk(
             url=args.url,
             markdown=_FIXTURE_MARKDOWN,
-            raw_html=b"<html>fixture</html>",
+            snapshot_key=_FIXTURE_SNAPSHOT_KEY,
+            snapshot_truncated=False,
             latency_ms=42,
         )
 
-    def _fake_build_agent() -> tuple[_FakeAgent, list[HttpScrapeResult]]:
-        last_scrape: list[HttpScrapeResult] = []
-        return _FakeAgent(last_scrape), last_scrape
+    def _fake_build_agent() -> _FakeAgent:
+        return _FakeAgent()
 
     monkeypatch.setattr("app.tools.http.scrape_http", _fake_scrape)
     monkeypatch.setattr("app.runner.build_agent", _fake_build_agent)
@@ -139,6 +171,7 @@ async def test_run_mission_streams_terminal_events(client: TestClient) -> None:
     task_end = next(e for e in events if e["type"] == "task_end")
     assert task_end["content"]["status"] == "succeeded"
     assert _FIXTURE_MARKDOWN.startswith(task_end["content"]["preview"][:20])
+    assert task_end["content"]["snapshot_key"] == _FIXTURE_SNAPSHOT_KEY
 
     done = next(e for e in events if e["type"] == "done")
     assert done["content"]["mission_status"] == "succeeded"
@@ -164,12 +197,14 @@ async def test_run_mission_persists_full_markdown(
     async with transaction() as session:
         from sqlmodel import select
 
-        rows = (await session.exec(select(Task).where(Task.mission_id == mission_id))).all()
+        rows = (await session.exec(select(Task).where(Task.mission_id == UUID(mission_id)))).all()
     assert len(rows) == 1
     task = rows[0]
     assert task.status == Status.SUCCEEDED
     assert task.parsed_markdown == _FIXTURE_MARKDOWN
     assert task.latency_ms == 42
+    assert task.snapshot_key == _FIXTURE_SNAPSHOT_KEY
+    assert task.snapshot_truncated is False
 
 
 @pytest.mark.asyncio
@@ -187,10 +222,7 @@ async def test_post_missions_returns_id_quickly(client: TestClient) -> None:
     assert response.headers["content-type"].startswith("application/json")
     body = response.json()
     assert "mission_id" in body
-    # UUID round-trip should not raise
-    import uuid
-
-    uuid.UUID(body["mission_id"])
+    UUID(body["mission_id"])  # round-trip
 
 
 @pytest.mark.asyncio

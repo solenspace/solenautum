@@ -6,14 +6,14 @@ from collections.abc import Coroutine
 from typing import Any
 from uuid import UUID
 
-from app.agent import build_agent
+from app.agent import MissionDeps, MissionResult, build_agent
 from app.llm import GroqProvider, LLMProviderChain, OpenRouterProvider
 from app.observability import start_mission_trace
 from app.persistence.models import Mission, MissionMode, Status, Task, Tier
 from app.persistence.repository import MissionRepository, TaskRepository
+from app.runner_helpers import _last_ok_tool_call
 from app.security import CurrentUser, _current_user, assert_safe_url
 from app.sse import emitter
-from app.tools.http import HttpToolDeps
 from autumn_sse_protocol import SseEvent
 from autumn_sse_protocol.models import (
     MissionStatus as SseMissionStatus,
@@ -92,6 +92,8 @@ async def _create_mission_and_task(*, user: CurrentUser, url: str) -> tuple[Miss
     mission = await _missions.create(prompt=url, mode=MissionMode.URL)
     await _missions.update_status(mission.id, Status.RUNNING)
 
+    # Initial tier; the agent may escalate (stealth → dynamic) but
+    # `tier_used` is not rewritten here. Future-spec concern.
     task = await _tasks.create(mission_id=mission.id, url=url, tier_used=Tier.HTTP)
     await _tasks.update(task.id, status=Status.RUNNING)
 
@@ -136,37 +138,62 @@ async def _execute_url_mission(
     )
 
     chain = LLMProviderChain(primary=OpenRouterProvider(), fallback=GroqProvider())
-    deps = HttpToolDeps(robots_override=mission.robots_override)
-    agent, last_scrape = build_agent()
+    deps = MissionDeps(
+        user_id=user.user_id,
+        mission_id=mission.id,
+        task_id=task.id,
+        robots_override=mission.robots_override,
+    )
+    agent = build_agent()
 
     try:
 
         async def _run(model):  # type: ignore[no-untyped-def]
-            # Reset on every attempt so a fallback retry after a partial primary
-            # run doesn't merge two tool histories.
-            last_scrape.clear()
             return await agent.run(url, model=model, deps=deps)
 
         result = await chain.with_fallback(_run)
 
-        full_markdown = last_scrape[-1].markdown if last_scrape else ""
-        latency_ms = last_scrape[-1].latency_ms if last_scrape else None
-        preview = full_markdown[:_PREVIEW_CHARS]
+        ok_call = _last_ok_tool_call(result)
+        mission_result: MissionResult = result.output
+        succeeded = mission_result.status == "ok"
+        final_status = Status.SUCCEEDED if succeeded else Status.FAILED
+        sse_status_value = SseStatus.succeeded.value if succeeded else SseStatus.failed.value
+        mission_status_value = (
+            SseMissionStatus.succeeded.value if succeeded else SseMissionStatus.failed.value
+        )
 
         await _tasks.update(
             task.id,
-            status=Status.SUCCEEDED,
-            latency_ms=latency_ms,
-            parsed_markdown=full_markdown,
-            snapshot_truncated=False,
+            status=final_status,
+            latency_ms=ok_call.latency_ms if ok_call else None,
+            parsed_markdown=ok_call.markdown if ok_call else None,
+            snapshot_key=ok_call.snapshot_key if ok_call else None,
+            snapshot_truncated=ok_call.snapshot_truncated if ok_call else False,
         )
 
+        if mission_result.status == "error":
+            error_content: dict[str, Any] = {
+                "code": mission_result.error_code or "agent_failed",
+                "message": mission_result.summary,
+            }
+            if mission_result.detected_protections:
+                error_content["detected_protections"] = mission_result.detected_protections
+            await _emit(
+                "error",
+                error_content,
+                mission_id=mission.id,
+                task_id=task.id,
+            )
+
+        preview = (ok_call.markdown if ok_call else "")[:_PREVIEW_CHARS]
         task_end_content: dict[str, Any] = {
-            "status": SseStatus.succeeded.value,
+            "status": sse_status_value,
             "preview": preview,
         }
-        if latency_ms is not None:
-            task_end_content["latency_ms"] = latency_ms
+        if ok_call is not None:
+            task_end_content["latency_ms"] = ok_call.latency_ms
+            if ok_call.snapshot_key:
+                task_end_content["snapshot_key"] = ok_call.snapshot_key
         await _emit(
             "task_end",
             task_end_content,
@@ -174,18 +201,19 @@ async def _execute_url_mission(
             task_id=task.id,
         )
 
-        await _missions.update_status(mission.id, Status.SUCCEEDED)
+        await _missions.update_status(mission.id, final_status)
         await _emit(
             "done",
-            {"mission_status": SseMissionStatus.succeeded.value, "cost_cents": 0},
+            {"mission_status": mission_status_value, "cost_cents": 0},
             mission_id=mission.id,
         )
 
         trace.update(
             output={
-                "status": "succeeded",
-                "summary": result.output.summary,
-                "primary_url": result.output.primary_url,
+                "status": "succeeded" if succeeded else "failed",
+                "summary": mission_result.summary,
+                "primary_url": mission_result.primary_url,
+                "error_code": mission_result.error_code,
             },
         )
     except Exception as exc:
