@@ -1,7 +1,7 @@
 "use client";
 
 import { useClerk } from "@clerk/nextjs";
-import { Eye, Globe2, LogOut, PanelLeft } from "lucide-react";
+import { Eye, Globe2, ListPlus, LogOut, PanelLeft } from "lucide-react";
 import { useState } from "react";
 
 import {
@@ -30,6 +30,7 @@ export function CommandPalette() {
   const [open, setOpen] = useState(false);
   const recent = useRecentMissions();
   const openMission = useMissionStore((s) => s.openMission);
+  const openMultiUrl = useMissionStore((s) => s.openMultiUrl);
   const { signOut } = useClerk();
 
   useShortcut(["cmd+k", "ctrl+k"], () => setOpen((value) => !value), { allowInInput: true });
@@ -73,6 +74,16 @@ export function CommandPalette() {
             <Globe2 className="h-3.5 w-3.5" />
             {t("mission", "newMission")}
             <CommandShortcut>⌘N</CommandShortcut>
+          </CommandItem>
+          <CommandItem
+            onSelect={() => {
+              setOpen(false);
+              openMultiUrl();
+            }}
+          >
+            <ListPlus className="h-3.5 w-3.5" />
+            {t("mission", "newMultiUrlMission")}
+            <CommandShortcut>⌘⇧N</CommandShortcut>
           </CommandItem>
           <CommandItem onSelect={() => setOpen(false)}>
             <Eye className="h-3.5 w-3.5" />

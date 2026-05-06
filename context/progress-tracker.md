@@ -11,8 +11,14 @@ resuming a session.
 
 ## Current Goal
 
-- Implementing `specs/10-taskgroup-runner.md` (TaskGroup runner +
-  per-mission browser semaphore; closes Spec 08's invariant-3 deviation).
+- Implementing `specs/12-url-discovery-tavily.md` next. Spec 11 shipped:
+  the slide-over now renders the multi-lane stack with sticky aggregate
+  header (done / streaming / errored / elapsed), J/K lane navigation
+  with auto-expand, Enter/x pin/unpin, 1.5s succeeded auto-collapse, the
+  three-mode reasoning renderer (focused / tail / `…thinking` after 5s
+  idle), inline error chips, and a mobile single-lane swipe view with
+  status-dot strip. Mission-level `aria-live="polite"` covers milestone
+  announcements only; lane bodies stay `aria-live="off"`.
 
 ## Completed
 
@@ -410,25 +416,171 @@ resuming a session.
   Vitest reports 30 passed (5 test files including the new
   `result-preview.test.tsx`).
 
+- **Spec 10 — concurrent-task-execution.** Single-URL agent became a
+  concurrent N-URL agent (1–20 URLs per mission). `apps/api/app/runner.py`
+  rewritten around a `MissionRunner` class that owns one
+  `asyncio.TaskGroup` per mission and spawns one `_run_task` coroutine
+  per URL; each coroutine runs `agent.run(url)` and emits its own
+  `task_start`/`task_end` events. Per-mission semaphores
+  (`MissionSemaphores.http=20`, `browser=3`) layer over Spec 09's
+  global ceilings via a stacked `async with self.http, _GLOBAL_HTTP`;
+  binding flows through `contextvars.ContextVar` so
+  `TaskGroup.create_task` propagates the mission scope to children
+  without changing tier-tool signatures. `apps/api/app/concurrency.py`
+  gains `MissionSemaphores`, `with_mission_semaphores`,
+  `current_mission_semaphores`. `apps/api/app/tools/http.py` now
+  acquires a layered HTTP slot (Spec 09 had no gate on the HTTP
+  tier); `tools/stealth.py` and `tools/dynamic.py` swap their direct
+  `browser_slot()` calls for the layered helper. The legacy
+  `_spawn_detached` + `_inflight_tasks` is gone — Spec 08's
+  invariant-3 deviation (Open Question 7) is closed. The lifespan
+  TaskGroup wired in `apps/api/app/main.py` adopts each `MissionRunner`
+  via `emitter.adopt_runner(...)`; `apps/api/app/sse.py` exposes
+  `bind_lifespan_tg()` and `adopt_runner()`, and a `_RunnableMission`
+  Protocol avoids the runner→sse→runner import cycle. Runner errors
+  are wrapped in `_shielded_run` so a single mission failure does not
+  abort the lifespan group. Cancellation mechanic: `MissionRunner.
+  request_cancellation()` flips an `asyncio.Event`; tasks observe at
+  entry and bail with `Status.CANCELLED`; mid-flight `CancelledError`
+  emits a `task_end:cancelled` before re-raising (invariant 5).
+  `apps/api/app/runner_helpers.py` renames `_last_ok_tool_call` →
+  `last_ok_tool_call` (now a public helper) and adds
+  `compute_mission_status_from_db` (rolls task statuses up:
+  succeeded if all OK, failed if any failed, else cancelled) and
+  `emit_mission_terminal` (formats the mission `done` event).
+  `TaskRepository` adds `list_by_mission` (ownership-scoped via the
+  Task→Mission join). `apps/api/app/observability.py::start_mission_trace`
+  becomes `task_id`-optional — multi-task missions don't carry one
+  task_id at the trace level. Routes: `POST /missions` body switches
+  to `urls: list[Annotated[str, StringConstraints(max_length=2048)]]`
+  with `Field(min_length=1, max_length=20)`; the legacy
+  `GET /run-mission?url=...` and `run_url_mission` are dropped (the
+  test fixtures migrated to `POST /missions` + `GET /run-mission/
+  {id}/stream`). Web side: new `apps/web/widgets/multi-url-slideover/`
+  composes 1–20 URLs in a Sheet (right side, sm:max-w-2xl) with a
+  `<textarea rows={12}>`, zod validation returning i18n keys
+  (`missionUrlsRequired`/`TooMany`/`Invalid`), Cmd+Enter submit, Esc
+  close. Mounted in `app/(app)/layout.tsx`; opened from the command
+  palette via a new `<CommandItem onSelect={openMultiUrl}>` with
+  shortcut `⌘⇧N` and `ListPlus` icon. `useMissionStore` gains
+  `multiUrlOpen`/`openMultiUrl`/`closeMultiUrl`; `useSubmitMission`
+  extracts `submitMany(urls)` (single-URL `submit` becomes a thin
+  wrapper). Seven new i18n keys: `mission.newMultiUrlMission`,
+  `multiUrlHelp`, `multiUrlPlaceholder`, `urlCount{,_one,_other}`,
+  `validation.missionUrls{Required,TooMany,Invalid}`. **Heartbeat
+  deviation from Section E** (greenlit before implementation): the
+  existing per-stream `asyncio.wait_for(timeout=_HEARTBEAT_INTERVAL_S)`
+  in `sse.py:120-122` is functionally complete; restructuring it into
+  a per-mission task that pushes pre-formatted bytes through the
+  queue (with a queue-type churn) was rejected in favor of keeping
+  the simpler design and adding `test_sse_heartbeat.py` to prove it.
+  Three new pytest files: `test_concurrency_layered.py` (HTTP-20 and
+  browser-3 caps + cancellation release + ContextVar propagation
+  through TaskGroup children), `test_runner_taskgroup.py`
+  (concurrency, cancellation-before-run, no-detached-tasks; 4 cases),
+  `test_sse_heartbeat.py` (heartbeat fires within patched interval +
+  heartbeats do not consume seq). Two existing route tests
+  (`test_run_mission_route.py`, `test_runner_error_propagation.py`)
+  migrated from the legacy GET to POST + GET stream and gained a
+  `_FakeChain` so they no longer depend on `OPENROUTER_API_KEY`/
+  `GROQ_API_KEY`. Two new web Vitest files: `multi-url-slideover.
+  test.tsx` (6 cases including pluralization), and additions to
+  `use-submit-mission.test.tsx` covering `submitMany`. **Verification
+  gate**: `pnpm typecheck` exits 0; `pnpm lint` exits 0; pytest 70
+  passed / 19 skipped; Vitest 39 passed across 6 files; `pnpm build`
+  exits 0; `grep -n "asyncio.create_task" apps/api/app/runner.py`
+  is empty; `grep -rn "TODO(spec-10)" apps packages` is empty. Open
+  Question 7 closed; Open Question 1 marked resolved (mechanic
+  shipped, user-facing endpoint deferred to Spec 14).
+
+- **Spec 11 — multi-lane-web-ui.** Spec 08's single `TaskLaneCard`
+  retired; the slide-over now renders `apps/web/widgets/task-lane-stack/`
+  — a sticky four-field aggregate header (`{succeeded}/{total} done`,
+  `{running} streaming`, `{failed} errored`, mm:ss `elapsed`) plus a
+  vertical stack of `TaskLaneRow`s. **Three new hooks** under
+  `apps/web/features/run-mission/`: `useTaskLanes` projects
+  `useMissionStream`'s events into per-task lanes via a `useMemo` on
+  `events`, with per-task `startedAt` / `lastTokenAt` / `finishedAt`
+  held in a sibling `useRef<Map>` *outside* the memo (a fresh
+  `Date.now()` inside the loop would shift these forward on every
+  re-projection — the spec pseudocode's drift bug; the timestamps
+  advance only when first-seen or when a per-task token count grows);
+  `useLaneFocus` owns the J/K index + Enter-pin set with wrap and
+  index-clamping when lanes shrink; `useMissionSummary` aggregates
+  counts and drives a 500ms elapsed clock that freezes once every
+  lane is terminal. **Lane row** uses data-attribute styling
+  (`data-focused`, `data-status`, `data-user-expanded`,
+  `data-expanded`) and a `setTimeout`-driven re-render at the 1.5s
+  auto-collapse boundary; expansion priority is focus → pin →
+  pending/running → failed/cancelled → succeeded-within-1.5s. **Three-
+  mode reasoning** in `reasoning-stream.tsx`: focused = full text,
+  unfocused-active = last 80 chars (`line-clamp-1 truncate`),
+  unfocused-idle (≥ 5s since `lastTokenAt`) = `…thinking` chip; a 1s
+  internal interval drives the threshold. **InlineErrorChip extracted**
+  out of Spec 09's `result-preview.tsx` into its own file with a
+  cleaner `{ code, message, detectedProtections? }` prop bag (no more
+  synthetic SseError construction in callers); `result-preview.tsx`
+  trims to a `{ preview }` string prop. **Mobile breakpoint (< 768px)**
+  via the existing `useIsMobile()` hook: stack collapses to a single
+  visible focused lane, `react-swipeable`'s `useSwipeable` maps
+  swipe-left/right to `focus.next/previous`, and a strip in the
+  aggregate header shows `{focusIndex+1}/{total}` plus a row of small
+  status dots (one per lane). **ARIA**: a single `role="status"
+  aria-live="polite"` region on the slide-over root carries milestone
+  announcements only — mission start (once), per-lane terminal,
+  mission complete, mission-level error; lane bodies set
+  `aria-live="off"` so screen readers read content on demand. Eleven
+  user-facing keys plus two plural pairs added to the `mission`
+  namespace (`headerDone{,_one,_other}`, `headerStreaming`,
+  `headerErrored`, `headerElapsed`, `reconnecting`, `connecting`,
+  `ariaMissionRegion`, `ariaMissionStarted{,_one,_other}`,
+  `ariaLaneTerminal`, `ariaMissionComplete`, `ariaMissionFailed`).
+  **Page-level wiring** updated `apps/web/app/(app)/missions/page.tsx`
+  to render `TaskLaneStack`; the slide-over widget is unchanged
+  (composition stays at the page layer per FSD). The
+  `apps/web/widgets/task-lane-card/` directory was deleted; the
+  carry-overs (`tier-badge.tsx`, `result-preview.tsx`, the new
+  `inline-error-chip.tsx`) live under
+  `apps/web/widgets/task-lane-stack/`. Eight new test files: three
+  hook tests (`use-task-lanes.test.ts` 7 cases — projection, ordering,
+  tool pairing, error capture, startedAt stability;
+  `use-lane-focus.test.ts` 8 cases — wrap, pin/unpin, clamp;
+  `use-mission-summary.test.ts` 5 cases — counts, ticking, freeze) and
+  five widget tests (`reasoning-stream.test.tsx` 5 cases for the three
+  modes + transition; `aggregate-header.test.tsx` 4 cases;
+  `task-lane-row.test.tsx` 7 cases including the 1.5s auto-collapse;
+  `inline-error-chip.test.tsx` 6 cases ported from Spec 09's
+  result-preview test; `result-preview.test.tsx` 3 cases;
+  `task-lane-stack.test.tsx` 9 cases — desktop/mobile end-to-end with
+  mocked `useMissionStream` + `useIsMobile`). **Verification gate**:
+  `turbo run typecheck` exits 0; `turbo run lint` exits 0 (Biome a11y
+  rules pass); `turbo run build` exits 0; web Vitest 84 passed across
+  14 files; `git ls-files apps/web/widgets/task-lane-card` returns
+  empty.
+
 ## In Progress
 
-- `specs/10-taskgroup-runner.md` — to begin next session. Closes
-  Spec 08's invariant-3 deviation (`_spawn_detached` →
-  `TaskGroup.create_task`) and adds per-mission HTTP/browser
-  semaphores (HTTP 20, browser 3) on top of Spec 09's global
-  ceilings.
+- `specs/12-url-discovery-tavily.md` — next session. Spec 12 introduces
+  the description-mode mission flow (Tavily-backed URL discovery + the
+  user-approval gate); discovered URLs feed into Spec 11's existing
+  lane stack once tasks start.
 
 ## Next Up
 
-- Implement `specs/10-taskgroup-runner.md`. The remaining specs
+- Implement `specs/12-url-discovery-tavily.md`. The remaining specs
   follow in numbered order; each spec's `Done when` checklist
   gates progress to the next.
 
 ## Open Questions
 
-1. **Mission cancellation semantics.** Working assumption: pending
-   tasks cancel, in-flight tasks finish (least surprising). Document
-   and confirm in `specs/14-cost-and-mission-lifecycle.md`.
+1. **Mission cancellation semantics — RESOLVED in Spec 10.**
+   `MissionRunner.request_cancellation()` sets an `asyncio.Event`;
+   tasks not yet started observe at entry and settle as `CANCELLED`;
+   in-flight tasks finish naturally; `CancelledError` (when Spec 14
+   plumbs `task.cancel()`) emits a `task_end:cancelled` then
+   re-raises. The user-facing `DELETE /missions/{id}` endpoint plus
+   the cost-cap reaper are deferred to
+   `specs/14-cost-and-mission-lifecycle.md`.
 2. **Tavily vs Exa for discovery.** Tavily is the user-confirmed
    primary; the 2026 audit favors Exa for embeddings-first agent
    search. Both have free tiers. Revisit after
@@ -458,14 +610,11 @@ resuming a session.
    Spec 13 (adaptive selectors) replaces with `INSERT ... ON CONFLICT
    DO UPDATE` to close the window. No-op until then because Spec 05
    ships zero concurrent selector writers.
-7. **Spec 10 must close `runner._spawn_detached` invariant-3
-   deviation.** `apps/api/app/runner.py::_spawn_detached` uses
-   `asyncio.create_task` outside a TaskGroup with a `# TODO(spec-10)`
-   marker. The detached task is held alive by `_inflight_tasks` set
-   + `add_done_callback(discard)` to avoid GC, but ownership is not
-   structured. Spec 10 replaces with `TaskGroup.create_task` and
-   call sites stay unchanged. The `scrape-pipeline-doctor` review of
-   Spec 10 fails until this lands.
+7. **Spec 08 invariant-3 deviation — CLOSED in Spec 10.**
+   `_spawn_detached` and the `_inflight_tasks` set are gone;
+   `MissionRunner` owns one `asyncio.TaskGroup` per mission and the
+   FastAPI lifespan owns the outer group that adopts each runner.
+   `grep -n "asyncio.create_task" apps/api/app/runner.py` is empty.
 8. **Spec 08 verification deferred to human reviewer.** Two
    verification items in `specs/08-web-shell-and-stream-consumer.md`
    require a real Clerk dev instance + browser run and are not
@@ -1034,3 +1183,89 @@ RLS policy migration and verify cross-tenant isolation test."
   Vitest 30 passed (5 test files including the new
   `widgets/task-lane-card/result-preview.test.tsx` with 9 cases).
   Next: Spec 10.
+- 2026-05-06: Spec 10 shipped on
+  `feature/spec-10-concurrent-task-execution`. Five things worth
+  recording: (1) **Heartbeat deviation from Section E.** `sse.py:120-122`
+  already emits `b": heartbeat\n\n"` via a per-stream
+  `asyncio.wait_for(timeout=15)` — restructuring it into a per-mission
+  asyncio task that pushes pre-formatted bytes through the queue
+  (with the queue-type churn from `tuple[seq,payload]|None` to
+  `bytes|None`) was rejected as needless churn after the user
+  greenlit the simpler path. The intent ("heartbeats every 15s so
+  proxies don't kill idle SSE streams") is met; `test_sse_heartbeat.py`
+  monkeypatches the interval down to 0.05s and proves it. (2) **Legacy
+  `GET /run-mission?url=...` retired** (user-greenlit). The two existing
+  tests (`test_run_mission_route.py`, `test_runner_error_propagation.py`)
+  migrated to `POST /missions` + `GET /run-mission/{id}/stream`; the
+  ring buffer covers the race between POST returning and the stream
+  attaching. Both tests gained a `_FakeChain` so they no longer
+  depend on `OPENROUTER_API_KEY`/`GROQ_API_KEY`. (3) **`_RunnableMission`
+  Protocol** breaks the runner→sse→runner import cycle: the emitter
+  needs only `runner.run() -> Awaitable[None]`, so a structural type
+  with that one method lets `adopt_runner` accept a `MissionRunner`
+  without importing it. Spec's literal pseudocode (`async def
+  adopt(self, mission_id, runner: "MissionRunner")` with private
+  `_tg` mutation from the lifespan) replaced with a clean
+  `bind_lifespan_tg(tg)` method + `_shielded_run` wrapper so an
+  unhandled mission error logs and continues instead of poisoning
+  the lifespan TaskGroup. (4) **Observability tweak**:
+  `start_mission_trace`'s `task_id` parameter became optional —
+  multi-task missions don't carry one task_id at the trace level
+  (per-task spans inherit the trace; `@observe`-decorated tools
+  carry their own `task_id` through `MissionDeps`). (5) **`getByLabelText`
+  in the slide-over test** found two matches because the
+  `<SheetTitle>` ("New multi-URL mission") and the textarea's
+  `aria-label="New multi-URL mission"` both expose the same
+  accessible name; switched to `getByRole("textbox")` which is
+  unique. **Verification gate**: `turbo run lint typecheck test
+  build` exits 0; pytest 70 passed / 19 skipped; Vitest 39 passed
+  across 6 test files; `grep -n "asyncio.create_task"
+  apps/api/app/runner.py` is empty; `grep -rn "TODO(spec-10)" apps
+  packages` is empty. Open Questions 1 and 7 closed in this commit.
+  Next: Spec 11.
+- 2026-05-06: Spec 11 shipped on
+  `feature/spec-11-multi-lane-web-ui`. Six things worth recording:
+  (1) **Timestamp drift bug in spec pseudocode.** Section C of
+  `specs/11-multi-lane-web-ui.md` stamps `lane.startedAt = Date.now()`
+  and `lane.lastTokenAt = Date.now()` inside the projection — but the
+  projection is a `useMemo` that rebuilds from scratch on every events
+  change. A fresh `Date.now()` inside the loop shifts these forward
+  on every event, breaking the 5s-idle reasoning collapse and the
+  elapsed clock. Fix: per-task timestamps live in a sibling
+  `useRef<Map<taskId, { startedAt; tokenCount; lastTokenAt;
+  finishedAt? }>>` outside the memo; `startedAt` stamps once,
+  `lastTokenAt` advances only when the per-task token count grows
+  past the recorded count, `finishedAt` stamps on the first terminal
+  event for that task. (2) **`MissionDetailSlideover` is renderBody-
+  composition, not a direct importer.** Spec §N showed the slide-over
+  importing `TaskLaneStack` directly — that crosses the FSD widget-
+  to-widget boundary. Real fix: edit
+  `apps/web/app/(app)/missions/page.tsx` (the page is allowed to
+  compose widgets); the slide-over file is untouched. (3)
+  **Tailwind tokens in the spec don't match `globals.css`.** Spec
+  used `bg-accent-primary` and `bg-text-muted`; project tokens are
+  `bg-primary` and `bg-muted-foreground`. Substituted throughout.
+  (4) **`InlineErrorChip` didn't exist as its own file.** Spec §J
+  treated it as a Spec 09 carry-over but the chip was inlined in
+  `result-preview.tsx`. Extracted into
+  `widgets/task-lane-stack/inline-error-chip.tsx` with a clean
+  `{ code, message, detectedProtections? }` prop bag — avoids
+  callers having to construct synthetic `SseError` objects. (5)
+  **Biome lint nits.** Internal helper named `_useMissionAnnouncements`
+  triggered `useHookAtTopLevel` (Biome required the canonical `use…`
+  prefix without the underscore); `aria-relevant` on a role-less div
+  triggered `useAriaPropsSupportedByRole` — both fixed by renaming and
+  by adding `role="status"` to the announcement region. The
+  `…thinking` span's `aria-label` switched to `title` since
+  `aria-label` on a span trips the same rule. (6) **Lane-terminal
+  vs mission-complete announcement collision.** Both run in the
+  same effect cycle and a polite live region overwrites; the
+  per-lane terminal announcement disappears at the moment the
+  mission completes. Acceptable for now: the mission-complete text
+  is the right thing for the user to hear at the end. The
+  per-lane announcement stays observable when the mission has more
+  than one lane and at least one is still running. **Verification
+  gate**: `turbo run typecheck` exits 0; `turbo run lint` exits 0;
+  `turbo run build` exits 0; web Vitest 84 passed across 14 test
+  files; `git ls-files apps/web/widgets/task-lane-card` returns
+  empty. Next: Spec 12.

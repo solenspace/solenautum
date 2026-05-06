@@ -20,7 +20,7 @@ from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from pydantic import BaseModel, Field
 from scrapling.fetchers import PlayWrightFetcher
 
-from app.concurrency import browser_slot
+from app.concurrency import current_mission_semaphores
 from app.extract import MarkdownExtractor
 from app.observability import observe
 from app.persistence.snapshot import persist_snapshot
@@ -74,7 +74,7 @@ async def scrape_dynamic(deps: DynamicDeps, args: DynamicScrapeArgs) -> DynamicS
 
     start = perf_counter()
 
-    async with browser_slot():  # invariant 2
+    async with current_mission_semaphores().browser_slot():  # invariant 2 (layered)
         try:
             page = await PlayWrightFetcher.async_fetch(
                 args.url,

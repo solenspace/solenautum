@@ -116,6 +116,20 @@ class TaskRepository:
         async with transaction() as session:
             return (await session.exec(_owned_task_stmt(task_id, user_id))).first()
 
+    async def list_by_mission(self, mission_id: uuid.UUID) -> list[Task]:
+        """All tasks belonging to one mission, ownership-scoped via the
+        Task→Mission join. Used by the runner to compute the rolled-up
+        mission status after the TaskGroup exits.
+        """
+        user_id = require_user_id()
+        async with transaction() as session:
+            stmt = (
+                select(Task)
+                .join(Mission)
+                .where(Task.mission_id == mission_id, Mission.user_id == user_id)
+            )
+            return list((await session.exec(stmt)).all())
+
     async def update(
         self,
         task_id: uuid.UUID,

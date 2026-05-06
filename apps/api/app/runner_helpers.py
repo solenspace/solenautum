@@ -1,10 +1,15 @@
-"""Runner helpers for the multi-tier agent.
+"""Runner helpers for the multi-tier, multi-task agent.
 
-`_last_ok_tool_call` walks the agent's message history in reverse to
+`last_ok_tool_call` walks the agent's message history in reverse to
 find the most recent successful tool result (an `*Ok` model). The
 runner uses it to recover `snapshot_key`, `markdown`, `latency_ms`,
 and `snapshot_truncated` for the `tasks` row update — without passing
 the full markdown / raw HTML through the LLM context.
+
+`compute_mission_status_from_db` reads the freshest task statuses from
+Neon after the per-mission TaskGroup exits and rolls them up into one
+mission-level `Status`. `emit_mission_terminal` formats and dispatches
+the `done` SSE event.
 
 The `dict`-form fallback in `_coerce_ok` is defensive against
 Pydantic AI patch-version serialization changes: today
@@ -15,14 +20,20 @@ future patch normalizes content to a JSON dict.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
+from uuid import UUID
 
 from pydantic import BaseModel, ValidationError
 from pydantic_ai.messages import ModelRequest, ToolReturnPart
 
+from app.persistence.models import Status
 from app.tools.dynamic import DynamicScrapeOk
 from app.tools.http import HttpScrapeOk
 from app.tools.stealth import StealthScrapeOk
+
+if TYPE_CHECKING:
+    from app.persistence.repository import TaskRepository
+    from app.sse import SseEmitter
 
 OkResult = HttpScrapeOk | StealthScrapeOk | DynamicScrapeOk
 
@@ -33,7 +44,7 @@ _OK_TYPES: tuple[type[BaseModel], ...] = (
 )
 
 
-def _last_ok_tool_call(result: Any) -> OkResult | None:
+def last_ok_tool_call(result: Any) -> OkResult | None:
     """Return the most recent `ToolReturnPart` whose content is an
     `*Ok` model, or `None` if the agent never had a successful tool
     call.
@@ -70,3 +81,65 @@ def _coerce_ok(content: Any) -> OkResult | None:
             except ValidationError:
                 continue
     return None
+
+
+async def compute_mission_status_from_db(mission_id: UUID, tasks_repo: TaskRepository) -> Status:
+    """Roll the per-task statuses up into one mission-level status.
+
+    - SUCCEEDED iff every task succeeded.
+    - FAILED if any task failed (FAILED dominates CANCELLED so a
+      partially-cancelled-but-also-failed mission surfaces as failed —
+      the actionable signal).
+    - CANCELLED otherwise (any task cancelled, none failed). Includes
+      the empty-tasks edge case, which the validator in
+      `start_url_mission` already prevents but is handled defensively.
+
+    Reads from the DB so it observes the freshest status set by each
+    `_run_task` coroutine; the in-memory `Task` instances captured at
+    creation time are stale by the time the TaskGroup exits.
+    """
+    tasks = await tasks_repo.list_by_mission(mission_id)
+    statuses = {t.status for t in tasks}
+    if statuses == {Status.SUCCEEDED}:
+        return Status.SUCCEEDED
+    if Status.FAILED in statuses:
+        return Status.FAILED
+    return Status.CANCELLED
+
+
+async def emit_mission_terminal(
+    emitter: SseEmitter,
+    *,
+    mission_id: UUID,
+    status: Status,
+    cost_cents: int = 0,
+) -> None:
+    """Emit the mission-level `done` SSE event with the rolled-up status.
+
+    The schema's `mission_status` enum is succeeded/failed/cancelled;
+    PENDING/RUNNING are filtered upstream (`compute_mission_status_from_db`
+    only returns terminal values).
+    """
+    from autumn_sse_protocol import SseEvent
+
+    mission_status = _MISSION_STATUS_MAP[status]
+    await emitter.emit(
+        SseEvent.model_validate(
+            {
+                "type": "done",
+                "content": {
+                    "mission_status": mission_status,
+                    "cost_cents": cost_cents,
+                },
+                "mission_id": str(mission_id),
+                "seq": 0,
+            }
+        )
+    )
+
+
+_MISSION_STATUS_MAP: dict[Status, str] = {
+    Status.SUCCEEDED: "succeeded",
+    Status.FAILED: "failed",
+    Status.CANCELLED: "cancelled",
+}

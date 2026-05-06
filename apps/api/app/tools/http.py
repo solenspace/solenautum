@@ -1,8 +1,9 @@
 """HTTP tier — Scrapling `AsyncFetcher` + Crawl4AI markdown extraction.
 
 Returns `HttpScrapeOk | HttpScrapeFailure`. Reasons drive the agent's
-escalation contract; see `agent.py`'s system prompt. `http_slot()` is
-not acquired here — Spec 10 wires it.
+escalation contract; see `agent.py`'s system prompt. The fetch acquires
+a layered HTTP slot (per-mission then global) so a 20-URL mission does
+not saturate the process-wide budget.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 from scrapling.fetchers import AsyncFetcher
 
+from app.concurrency import current_mission_semaphores
 from app.extract import MarkdownExtractor
 from app.observability import observe
 from app.persistence.snapshot import persist_snapshot
@@ -78,12 +80,13 @@ async def scrape_http(deps: HttpToolDeps, args: HttpScrapeArgs) -> HttpScrapeRes
     )
 
     start = perf_counter()
-    page = await AsyncFetcher.get(
-        args.url,
-        stealthy_headers=True,
-        follow_redirects=True,
-        timeout=15,
-    )
+    async with current_mission_semaphores().http_slot():
+        page = await AsyncFetcher.get(
+            args.url,
+            stealthy_headers=True,
+            follow_redirects=True,
+            timeout=15,
+        )
     latency_ms = int((perf_counter() - start) * 1000)
 
     if page.status == 404:

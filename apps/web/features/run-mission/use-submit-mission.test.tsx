@@ -60,6 +60,24 @@ describe("useSubmitMission", () => {
     );
   });
 
+  it("posts a `urls` array (single-element) on submit", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ mission_id: "abc-123" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderHook(() => useSubmitMission());
+    await act(async () => {
+      await result.current.submit("https://example.com/");
+    });
+
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(JSON.parse(init.body as string)).toEqual({
+      urls: ["https://example.com/"],
+    });
+  });
+
   it("returns missionFailed on a non-2xx response", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, json: async () => ({}) }));
     const { result } = renderHook(() => useSubmitMission());
@@ -67,5 +85,37 @@ describe("useSubmitMission", () => {
       await result.current.submit("https://example.com/");
     });
     expect(result.current.error).toBe("missionFailed");
+  });
+
+  describe("submitMany (multi-URL)", () => {
+    it("posts the array as `urls` and opens the slide-over", async () => {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ mission_id: "multi-1" }),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const urls = ["https://a.example/", "https://b.example/"];
+      const { result } = renderHook(() => useSubmitMission());
+      await act(async () => {
+        await result.current.submitMany(urls);
+      });
+
+      const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
+      expect(JSON.parse(init.body as string)).toEqual({ urls });
+      await waitFor(() => {
+        expect(useMissionStore.getState().openMissionId).toBe("multi-1");
+      });
+      expect(result.current.error).toBeNull();
+    });
+
+    it("surfaces missionFailed on non-2xx", async () => {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, json: async () => ({}) }));
+      const { result } = renderHook(() => useSubmitMission());
+      await act(async () => {
+        await result.current.submitMany(["https://a.example/"]);
+      });
+      expect(result.current.error).toBe("missionFailed");
+    });
   });
 });

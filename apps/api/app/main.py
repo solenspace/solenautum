@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -12,6 +13,7 @@ from slowapi.middleware import SlowAPIMiddleware
 from app.llm.probe import probe_providers
 from app.routes import router as api_router
 from app.security import RequireUser, limiter
+from app.sse import emitter
 
 log = logging.getLogger(__name__)
 
@@ -21,12 +23,20 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """Startup probe surfaces missing LLM/Langfuse credentials in the boot
     log. Failures are non-fatal so the api still boots in environments
     without keys (the chain raises at first call instead).
+
+    Wraps the yield region in an `asyncio.TaskGroup` and binds it to the
+    SSE emitter so `MissionRunner` instances spawned by `POST /missions`
+    are owned by a structured-concurrency parent (invariant 3). On
+    shutdown, the group awaits every in-flight runner to settle before
+    the process exits — no detached tasks, no orphaned browser sessions.
     """
     try:
         await probe_providers()
     except Exception as exc:  # pragma: no cover — probe must never crash boot
         log.warning("startup.probe_failed", extra={"error": str(exc)})
-    yield
+    async with asyncio.TaskGroup() as tg:
+        emitter.bind_lifespan_tg(tg)
+        yield
 
 
 app = FastAPI(title="Autumn API", lifespan=lifespan)

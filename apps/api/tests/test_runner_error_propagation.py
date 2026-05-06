@@ -100,6 +100,15 @@ class _FakePage:
         self.body = body
 
 
+class _FakeChain:
+    """Replaces `LLMProviderChain` so the route test does not depend on
+    LLM env credentials. Just runs the callable with a sentinel model.
+    """
+
+    async def with_fallback(self, run: Any) -> Any:
+        return await run(object())
+
+
 @pytest.fixture
 def fake_user() -> CurrentUser:
     return CurrentUser(user_id=_FIXTURE_USER_ID, session_id="sess_err")
@@ -127,6 +136,7 @@ def patch_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("app.tools.http.AsyncFetcher.get", _fake_get)
     monkeypatch.setattr("app.tools.http.assert_robots_allows", _allow_all)
     monkeypatch.setattr("app.runner.build_agent", lambda: _FakeAgent())
+    monkeypatch.setattr("app.runner.LLMProviderChain", lambda **_kw: _FakeChain())
 
 
 @pytest.fixture
@@ -156,16 +166,26 @@ def _parse_sse(body: str) -> list[dict[str, Any]]:
     return events
 
 
-@pytest.mark.asyncio
-async def test_runner_emits_error_before_terminal_events(client: TestClient) -> None:
+def _post_and_stream(client: TestClient, urls: list[str]) -> tuple[str, list[dict[str, Any]]]:
+    start = client.post(
+        "/missions",
+        json={"urls": urls},
+        headers={"Authorization": "Bearer fake"},
+    )
+    assert start.status_code == 201, start.text
+    mission_id = start.json()["mission_id"]
+
     response = client.get(
-        "/run-mission",
-        params={"url": _FIXTURE_URL},
+        f"/run-mission/{mission_id}/stream",
         headers={"Authorization": "Bearer fake"},
     )
     assert response.status_code == 200, response.text
+    return mission_id, _parse_sse(response.text)
 
-    events = _parse_sse(response.text)
+
+@pytest.mark.asyncio
+async def test_runner_emits_error_before_terminal_events(client: TestClient) -> None:
+    _, events = _post_and_stream(client, [_FIXTURE_URL])
     types = [e["type"] for e in events]
 
     # error → task_end → done, in that order, after task_start
@@ -184,13 +204,7 @@ async def test_runner_emits_error_before_terminal_events(client: TestClient) -> 
 
 @pytest.mark.asyncio
 async def test_runner_marks_task_failed_in_db(client: TestClient, fake_user: CurrentUser) -> None:
-    response = client.get(
-        "/run-mission",
-        params={"url": _FIXTURE_URL},
-        headers={"Authorization": "Bearer fake"},
-    )
-    events = _parse_sse(response.text)
-    mission_id = events[0]["mission_id"]
+    mission_id, _ = _post_and_stream(client, [_FIXTURE_URL])
 
     _current_user.set(fake_user)
     async with transaction() as session:

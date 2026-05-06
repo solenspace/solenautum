@@ -5,7 +5,7 @@ register against one `Agent[MissionDeps, MissionResult]`. The agent
 chooses escalation based on the `reason` of each tier's typed
 `*Failure`, per the system prompt below. The runner reads
 `mission_result.error_code` and the most recent successful tool result
-(via `runner_helpers._last_ok_tool_call`) to write the SSE error event
+(via `runner_helpers.last_ok_tool_call`) to write the SSE error event
 and the `tasks` row.
 """
 
