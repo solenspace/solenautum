@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlmodel import select
+from sqlalchemy import delete as sa_delete, func, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlmodel import col, select
 from sqlmodel.sql.expression import SelectOfScalar
 
 from app.persistence.db import require_user_id, transaction
@@ -18,6 +20,7 @@ from app.persistence.models import (
     Tier,
     User,
 )
+from app.persistence.selector_cache import cache_evict, cache_get, cache_put
 
 
 def _owned_mission_stmt(mission_id: uuid.UUID, user_id: str) -> SelectOfScalar[Mission]:
@@ -207,41 +210,187 @@ class TaskRepository:
                 task.selector_cache_id = selector_cache_id
 
 
+_FAILURE_THRESHOLD = 3
+
+
+def _to_cache_dict(row: SavedSelector) -> dict[str, Any]:
+    """Cache shape — chosen so callers of `find()` can reconstruct a
+    transient `SavedSelector` and `ProcessLruStorage.retrieve` can pluck
+    the `payload` directly. Keeping `id` and `last_used_at` lets future
+    observability surfaces correlate cache hits with DB rows.
+    """
+    return {
+        "id": str(row.id),
+        "payload": row.payload,
+        "hit_count": row.hit_count,
+        "failure_count": row.failure_count,
+        "last_used_at": row.last_used_at.isoformat(),
+    }
+
+
+def _from_cache_dict(domain: str, purpose: str, cached: dict[str, Any]) -> SavedSelector:
+    return SavedSelector(
+        id=uuid.UUID(cached["id"]),
+        domain=domain,
+        purpose=purpose,
+        payload=cached["payload"],
+        hit_count=cached["hit_count"],
+        failure_count=cached["failure_count"],
+        last_used_at=datetime.fromisoformat(cached["last_used_at"]),
+    )
+
+
 class SelectorRepository:
     """Selector cache is deployment-scoped (architecture decision). No
-    `_current_user` filter; saved_selectors has no RLS policy.
+    `_current_user` filter; `saved_selectors` has no RLS policy. The
+    `transaction()` context still binds `app.user_id` when one is set —
+    harmless for this table because its policies don't reference it.
+
+    Read-through / write-through to the in-process LRU at
+    `app/persistence/selector_cache.py`. Eviction layers, in order of
+    precedence: LRU bound (silent), TTL sweep (Spec 13's
+    `selector_sweep_loop`), and consecutive-failure threshold.
     """
 
-    async def get(self, domain: str, purpose: str) -> SavedSelector | None:
+    async def find(self, domain: str, purpose: str) -> SavedSelector | None:
+        cached = cache_get(domain, purpose)
+        if cached is not None:
+            return _from_cache_dict(domain, purpose, cached)
+
         async with transaction() as session:
             stmt = select(SavedSelector).where(
                 SavedSelector.domain == domain,
                 SavedSelector.purpose == purpose,
             )
-            return (await session.exec(stmt)).first()
+            row = (await session.exec(stmt)).first()
+            if row is None:
+                return None
+            cache_put(domain, purpose, _to_cache_dict(row))
+            return row
 
     async def upsert(self, *, domain: str, purpose: str, payload: dict[str, Any]) -> SavedSelector:
-        # Spec 13 replaces this SELECT-then-INSERT with `INSERT ... ON CONFLICT
-        # DO UPDATE` to close the race window. Until then, concurrent upserts
-        # on the same (domain, purpose) can collide on the unique index.
-        async with transaction() as session:
-            stmt = select(SavedSelector).where(
-                SavedSelector.domain == domain,
-                SavedSelector.purpose == purpose,
+        """Atomic upsert via Postgres `INSERT ... ON CONFLICT DO UPDATE`.
+
+        Closes Open Question 6 (the SELECT-then-INSERT race window in the
+        previous implementation). On conflict we overwrite `payload`,
+        reset `failure_count` to 0 (a fresh save invalidates the
+        three-strikes counter), and bump `last_used_at`. We deliberately
+        do *not* touch `hit_count` here — that's `bump_hit_count`'s job.
+        """
+        now = datetime.now(UTC)
+        stmt = (
+            pg_insert(SavedSelector)
+            .values(
+                domain=domain,
+                purpose=purpose,
+                payload=payload,
+                hit_count=0,
+                failure_count=0,
+                last_used_at=now,
             )
-            existing = (await session.exec(stmt)).first()
-            if existing is None:
-                selector = SavedSelector(domain=domain, purpose=purpose, payload=payload)
-                session.add(selector)
-                await session.flush()
-                await session.refresh(selector)
-                return selector
-            existing.payload = payload
-            existing.hit_count += 1
-            existing.last_used_at = datetime.now(UTC)
-            await session.flush()
-            await session.refresh(existing)
-            return existing
+            .on_conflict_do_update(
+                index_elements=["domain", "purpose"],
+                set_={
+                    "payload": payload,
+                    "failure_count": 0,
+                    "last_used_at": now,
+                },
+            )
+            .returning(SavedSelector)
+        )
+        async with transaction() as session:
+            result = await session.execute(stmt)
+            row: SavedSelector = result.scalar_one()
+            cache_put(domain, purpose, _to_cache_dict(row))
+            return row
+
+    async def bump_hit_count(self, domain: str, purpose: str) -> int:
+        """Atomic `UPDATE ... SET hit_count = hit_count + 1` + cache refresh.
+
+        Caller must hold the invariant that the row exists (the recovery
+        path always finds an existing selector before bumping). If the
+        row was concurrently evicted, returns 0 — the next adaptive miss
+        will recreate it via `upsert`.
+        """
+        stmt = (
+            update(SavedSelector)
+            .where(
+                col(SavedSelector.domain) == domain,
+                col(SavedSelector.purpose) == purpose,
+            )
+            .values(
+                hit_count=SavedSelector.hit_count + 1,
+                last_used_at=datetime.now(UTC),
+            )
+            .returning(SavedSelector)
+        )
+        async with transaction() as session:
+            result = await session.execute(stmt)
+            row: SavedSelector | None = result.scalar_one_or_none()
+            if row is None:
+                cache_evict(domain, purpose)
+                return 0
+            cache_put(domain, purpose, _to_cache_dict(row))
+            return int(row.hit_count)
+
+    async def bump_failure_count(self, domain: str, purpose: str) -> int:
+        """Increment failure_count; auto-delete the row when it crosses the
+        three-strikes threshold. Returns the new failure_count (post-bump).
+        """
+        async with transaction() as session:
+            stmt = (
+                update(SavedSelector)
+                .where(
+                    col(SavedSelector.domain) == domain,
+                    col(SavedSelector.purpose) == purpose,
+                )
+                .values(failure_count=SavedSelector.failure_count + 1)
+                .returning(SavedSelector)
+            )
+            result = await session.execute(stmt)
+            row: SavedSelector | None = result.scalar_one_or_none()
+            if row is None:
+                cache_evict(domain, purpose)
+                return 0
+            new_count = int(row.failure_count)
+            if new_count >= _FAILURE_THRESHOLD:
+                await session.delete(row)
+                cache_evict(domain, purpose)
+            else:
+                cache_put(domain, purpose, _to_cache_dict(row))
+            return new_count
+
+    async def delete(self, domain: str, purpose: str) -> None:
+        async with transaction() as session:
+            await session.execute(
+                sa_delete(SavedSelector).where(
+                    col(SavedSelector.domain) == domain,
+                    col(SavedSelector.purpose) == purpose,
+                )
+            )
+        cache_evict(domain, purpose)
+
+    async def evict_older_than(self, *, days: int) -> int:
+        """Delete rows where `last_used_at` is older than `days`. Returns
+        the eviction count and clears matching cache entries.
+        """
+        cutoff = datetime.now(UTC) - timedelta(days=days)
+        async with transaction() as session:
+            stmt = (
+                sa_delete(SavedSelector)
+                .where(col(SavedSelector.last_used_at) < cutoff)
+                .returning(col(SavedSelector.domain), col(SavedSelector.purpose))
+            )
+            evicted = list((await session.execute(stmt)).all())
+        for evicted_domain, evicted_purpose in evicted:
+            cache_evict(evicted_domain, evicted_purpose)
+        return len(evicted)
+
+    async def count_all(self) -> int:
+        """Test-only helper for `evict_older_than` round-trip assertions."""
+        async with transaction() as session:
+            result = await session.execute(select(func.count()).select_from(SavedSelector))
+            return int(result.scalar_one())
 
 
 class UserRepository:

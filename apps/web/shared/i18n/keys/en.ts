@@ -85,6 +85,10 @@ export const EN = {
     searchPaused: "Search paused — Tavily returned {status}.",
     noResults: "No results for this query.",
     edited: "edited",
+    selectorsRecovered: "{count} selectors recovered",
+    selectorsRecovered_one: "1 selector recovered",
+    selectorsRecovered_other: "{count} selectors recovered",
+    selectorsRecoveredHint: "Saved selectors matched after the site's DOM shifted.",
   },
   validation: {
     urlRequired: "URL required",

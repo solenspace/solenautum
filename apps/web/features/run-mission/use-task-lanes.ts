@@ -33,6 +33,9 @@ export interface TaskLane {
   lastTokenAt: number;
   /** Wall-clock when the lane terminated, or undefined while running. Stable. */
   finishedAt?: number;
+  /** Count of `selector_recovered` events seen for this task. Drives the
+   * inline "selectors recovered" chip in the lane body (Spec 13). */
+  selectorRecoveryCount?: number;
 }
 
 interface _LaneTimes {
@@ -143,6 +146,9 @@ export function useTaskLanes(missionId: string | null, events: SseEvent[]): Task
         case "error":
           lane.errorCode = ev.content.code;
           lane.errorMessage = ev.content.message;
+          break;
+        case "selector_recovered":
+          lane.selectorRecoveryCount = (lane.selectorRecoveryCount ?? 0) + 1;
           break;
       }
     }

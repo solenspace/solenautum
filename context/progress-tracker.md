@@ -11,15 +11,16 @@ resuming a session.
 
 ## Current Goal
 
-- Implementing `specs/13-adaptive-selectors.md` next. Spec 12 shipped:
-  description-mode missions (Tavily-backed URL discovery + an inline
-  approval gate) now run end-to-end on the same SSE stream as URL-mode.
-  Two agents share the LLM-fallback chain (`build_discovery_agent` plus
-  the existing `build_agent`); the runner drives a four-phase state
-  machine (`discovering → awaiting_approval → scraping → done`) parked
-  on an `asyncio.Event` for the user's approval submit. The web
-  slide-over renders one of three child blocks based on the SSE-derived
-  phase: streaming discovery list, approval gate, or task-lane stack.
+- Implementing `specs/14-cost-and-mission-lifecycle.md` next. Spec 13
+  shipped: every tier tool now runs Scrapling's adaptive matcher for
+  the `MAIN_CONTENT` purpose between fetch and Crawl4AI extraction; a
+  1k-entry process-local LRU sits in front of `saved_selectors`,
+  write-through to Postgres on every successful save; three-strikes
+  failure-count + 30-day TTL sweep + LRU bound keep the table healthy.
+  Adaptive recoveries emit `selector_recovered` SSE events that the web
+  multi-lane stack renders as an inline "N selectors recovered" chip
+  next to the tool chips. Open Question 6 closed: `SelectorRepository.upsert`
+  now uses Postgres `INSERT … ON CONFLICT DO UPDATE`.
 
 ## Completed
 
@@ -654,19 +655,79 @@ resuming a session.
   open per the spec's Done-when list — revisit after real-world
   quality data.
 
+- **Spec 13 — adaptive-selectors.** Wires Scrapling 0.2.99's adaptive
+  selector machinery into every tier tool. **`select_main_content`**
+  (`apps/api/app/tools/_select.py`) sits between fetch and Crawl4AI
+  extraction in `http.py`/`stealth.py`/`dynamic.py`; uses a comma-list
+  CSS selector (`main, [role="main"], article, div.main, ...`), tries
+  the literal pattern with `auto_save=True`, and on miss-with-existing
+  tries similarity-based relocation at `percentage=70`. Crawl4AI then
+  runs over the *scoped* HTML — meaningfully smaller and cleaner than
+  the whole body. **Storage backend**:
+  `ProcessLruStorage(StorageSystemMixin)` at
+  `apps/api/app/tools/_storage.py` is wired via `BaseFetcher.custom_config`
+  on each fetch (`{"auto_match": True, "storage": ProcessLruStorage,
+  "storage_args": {"url": args.url}}`) — the spec's monkey-patch
+  pattern would have failed because Scrapling 0.2.99 builds `_storage`
+  at `Adaptor.__init__` time and `parser.py:114-118` hard-asserts
+  `hasattr(storage, "__wrapped__")`. **LRU cache** at
+  `apps/api/app/persistence/selector_cache.py` (cachetools 7.1
+  `LRUCache(maxsize=1000)`, keyed on `(domain, purpose)` per invariant
+  8). **`SelectorRepository`** refactored: `get` → `find` (read-through
+  to LRU); `upsert` switched to `INSERT … ON CONFLICT (domain, purpose)
+  DO UPDATE SET payload, failure_count=0, last_used_at` (closes Open
+  Question 6 — atomic, race-free); new methods `bump_hit_count`,
+  `bump_failure_count` (auto-deletes at threshold ≥ 3),
+  `delete`, `evict_older_than` (returning-driven). **Migration 0003**
+  (`a3e1cba17f24_add_failure_count`) adds the `failure_count INTEGER
+  NOT NULL DEFAULT 0` column with a clean `op.drop_column` downgrade.
+  **TTL sweep** (`apps/api/app/jobs/selector_sweep.py`) runs every 6 h
+  inside the lifespan TaskGroup (invariant 3 holds — structured
+  shutdown via `CancelledError`); evicts rows where `last_used_at <
+  now() - 30d` plus their LRU entries. **`SelectorPurpose`** StrEnum
+  has a single member (`MAIN_CONTENT`); new purposes are a one-line
+  addition. **`selector_recovered` event** (Spec 06's schema, already
+  generated): emitted from `select_main_content` only on a true
+  adaptive rescue (literal miss → similarity hit), with `hit_count` ≥
+  1 by construction; pre-emit `bump_hit_count` returning 0 short-
+  circuits the emit so the schema's `minimum: 1` constraint is never
+  violated. **Web**: `TaskLane.selectorRecoveryCount?: number` field +
+  projection case in `use-task-lanes.ts`; new
+  `SelectorRecoveryChip` widget (Sparkle icon, font-mono `[11px]`,
+  plural-aware via `t("mission","selectorsRecovered",{count})`,
+  tooltip from `selectorsRecoveredHint`); rendered in
+  `task-lane-row.tsx` next to the tool-chip row when count > 0. Four
+  new i18n keys under `mission`. **Tests**: 8 new pytest cases in
+  `test_selector_repository.py` (round-trip, ON-CONFLICT no-collision,
+  `upsert` resets failure_count, monotonic `bump_hit_count`,
+  three-strikes eviction, `delete` cache eviction, `evict_older_than`
+  + LRU clear) and 4 in `test_select_main_content.py` (first run /
+  drifted-DOM recovery / three-failure eviction / no-existing
+  fallback) — both DB-gated, skip cleanly without Neon. 1 new Vitest
+  case in `use-task-lanes.test.ts` (count partitioning by lane); 3 in
+  `selector-recovery-chip.test.tsx` (singular / plural / tooltip).
+  **Spec divergences from the original text** (forced by Scrapling
+  0.2.99 pin from Open Question 11): `auto_match` not `adaptive` on
+  `.css()`; storage threaded via `custom_config` not post-fetch
+  monkey-patch; sync `save()` writes the LRU only with the DB
+  write-through made explicit at the next yield point in the wrapper
+  (the spec's `loop.create_task(...)` would have detached from the
+  lifespan group, violating invariant 3); `MarkdownExtractor.extract`
+  takes `str` not `bytes` so the spec's `.encode("utf-8")` was
+  dropped. **Verification gate**: `turbo run lint` exits 0; `turbo
+  run typecheck` exits 0; `turbo run test` exits 0 (web 113 passed
+  across 18 files, api 86 passed / 42 skipped — the new selector
+  tests join the existing DB-gated set); `turbo run build` exits 0.
+  Open Question 6 closed (race window gone). Open Question 5
+  (cross-tenant selector visibility) stays open — deferred decision.
+
 ## In Progress
 
-- `specs/13-adaptive-selectors.md` — next session. Spec 13 closes
-  the `SelectorRepository.upsert` SELECT-then-INSERT race
-  (Open Question 6) and ships the per-domain selector cache the
-  dynamic tier consults before falling back to full Playwright
-  rendering.
-
-## Next Up
-
-- Implement `specs/13-adaptive-selectors.md`. The remaining specs
-  follow in numbered order; each spec's `Done when` checklist
-  gates progress to the next.
+- `specs/14-cost-and-mission-lifecycle.md` — Spec 13 fully landed
+  (adaptive selectors + LRU + TTL sweep + `selector_recovered` chip);
+  Spec 14 picks up the user-facing `DELETE /missions/{id}`, the
+  cost-cap reaper, and the per-mission deadline guard (Open Questions
+  1 and 12).
 
 ## Open Questions
 
@@ -701,12 +762,12 @@ resuming a session.
    per deployment, not per user. Cross-user reuse is faster but
    leaks information about scraping patterns. Revisit at scale or
    if a B2B customer requests isolation.
-6. **`SelectorRepository.upsert` SELECT-then-INSERT race.** Two
-   concurrent calls on the same `(domain, purpose)` can both miss
-   the SELECT and both attempt INSERT, hitting the unique index.
-   Spec 13 (adaptive selectors) replaces with `INSERT ... ON CONFLICT
-   DO UPDATE` to close the window. No-op until then because Spec 05
-   ships zero concurrent selector writers.
+6. **`SelectorRepository.upsert` SELECT-then-INSERT race — RESOLVED
+   in Spec 13.** `upsert` now compiles to `INSERT … ON CONFLICT
+   (domain, purpose) DO UPDATE SET payload, failure_count=0,
+   last_used_at` via `sqlalchemy.dialects.postgresql.insert`. Concurrent
+   writers on the same key cannot collide; the unique covering index
+   serializes them at the database level.
 7. **Spec 08 invariant-3 deviation — CLOSED in Spec 10.**
    `_spawn_detached` and the `_inflight_tasks` set are gone;
    `MissionRunner` owns one `asyncio.TaskGroup` per mission and the
@@ -1439,3 +1500,55 @@ RLS policy migration and verify cross-tenant isolation test."
   Open Question 2 (Tavily vs Exa) stays open per the spec's
   Done-when checklist — revisit after real-world quality data.
   Next: Spec 13.
+- 2026-05-06: Spec 13 shipped on
+  `feature/spec-13-adaptive-selectors`. **Architectural pivot from the
+  spec text**: spec assumed Scrapling 0.3+ but Open Question 11 pins
+  us to 0.2.99 (lxml 5.x conflict with crawl4ai 0.8.6). Three
+  consequences: (a) `.css()` kwarg is `auto_match` not `adaptive`;
+  (b) storage backend wired via `BaseFetcher.custom_config` at fetch
+  time, not the spec's post-fetch `page._storage = ...` monkey-patch
+  — Scrapling 0.2.99's `parser.py:114-118` hard-requires the storage
+  class be `lru_cache`-decorated and instantiated by `Adaptor.__init__`,
+  so we ship `ProcessLruStorage` as a class, threaded via
+  `custom_config={"auto_match": True, "storage": ProcessLruStorage,
+  "storage_args": {"url": args.url}}`; (c) Scrapling's sync `save()`
+  callback writes the LRU only — the DB upsert is an explicit `await`
+  in `select_main_content` after `.css()` returns, so we never
+  schedule a detached `loop.create_task(...)` from inside Scrapling
+  (invariant 3 holds). **Other corrections**: spec's
+  `extractor.extract(html=main_html.encode("utf-8"))` is wrong —
+  `MarkdownExtractor.extract` takes `str`, so we pass scoped HTML
+  directly; existing `SelectorRepository.upsert` had been bumping
+  `hit_count` on collision, but the spec moves that to a separate
+  `bump_hit_count` so the refactored `upsert` no longer touches
+  `hit_count`. **Files**: 7 new (`selector_cache.py`, `_purposes.py`,
+  `_storage.py`, `_select.py`, `jobs/__init__.py`,
+  `jobs/selector_sweep.py`, migration 0003), 2 new web
+  (`selector-recovery-chip.tsx` + test), 4 new pytest cases in
+  `test_selector_repository.py`, 4 in `test_select_main_content.py`,
+  1 in `use-task-lanes.test.ts`. **Edits**: `models.py`
+  (`failure_count`), `repository.py` (rename `get` → `find`, refactor
+  `upsert` to `INSERT ... ON CONFLICT DO UPDATE` via
+  `sqlalchemy.dialects.postgresql.insert`, four new methods using
+  `sqlmodel.col()` to wrap column refs for mypy strict),
+  `http.py`/`stealth.py`/`dynamic.py` (custom_config + helper call),
+  `main.py` (sweep task on lifespan TG), `pyproject.toml`
+  (cachetools 7.1 + lxml mypy override), `use-task-lanes.ts`
+  (`selectorRecoveryCount` field + projection case),
+  `task-lane-row.tsx` (chip render), `en.ts` (4 keys). **Selector
+  shape across cache + repo**: chose a row-shaped dict
+  (`{id, payload, hit_count, failure_count, last_used_at}`) so
+  `find()` can reconstruct a transient `SavedSelector` from cache
+  and `ProcessLruStorage.retrieve()` can pluck just `payload` —
+  same `(domain, purpose)` key, two consumers. **Tests**: DB-gated
+  pytest tests follow the existing `pytest.skipif(database_url is
+  None)` convention used by `test_repository.py`; they run against
+  Neon dev branches in environments where `DATABASE_URL` is set.
+  **Verification gate**: `turbo run lint` exits 0; `turbo run
+  typecheck` exits 0; `turbo run test` exits 0 (web 113 passed /
+  18 files, api 86 passed / 42 skipped, sse-protocol cached);
+  `turbo run build` exits 0. Open Question 6 closed; Open Question
+  5 (cross-tenant selector visibility) stays open per the spec's
+  out-of-scope list — revisit at scale. Open Question 11 stays
+  open as a longer-term hygiene item (Scrapling 0.3 + lxml 6 +
+  alternative markdown pipeline). Next: Spec 14.

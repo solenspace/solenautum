@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
+from app.jobs.selector_sweep import selector_sweep_loop
 from app.llm.probe import probe_providers
 from app.routes import router as api_router
 from app.security import RequireUser, limiter
@@ -36,6 +37,9 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         log.warning("startup.probe_failed", extra={"error": str(exc)})
     async with asyncio.TaskGroup() as tg:
         emitter.bind_lifespan_tg(tg)
+        # Spec 13: TTL sweep over `saved_selectors` runs every 6h. Owned
+        # by the lifespan group so shutdown cancels it via CancelledError.
+        tg.create_task(selector_sweep_loop(), name="selector-sweep")
         yield
 
 
