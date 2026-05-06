@@ -10,6 +10,7 @@ import { cn } from "@/shared/utils/cn";
 import { InlineErrorChip } from "./inline-error-chip";
 import { ReasoningStream } from "./reasoning-stream";
 import { ResultPreview } from "./result-preview";
+import { SelectorRecoveryChip } from "./selector-recovery-chip";
 import { TierBadge } from "./tier-badge";
 import { ToolChip } from "./tool-chip";
 
@@ -112,11 +113,14 @@ export function TaskLaneRow({ lane, isFocused, isPinned, onFocus }: TaskLaneRowP
             isFocused={isFocused}
             lastTokenAt={lane.lastTokenAt}
           />
-          {lane.toolCalls.length > 0 ? (
+          {lane.toolCalls.length > 0 || (lane.selectorRecoveryCount ?? 0) > 0 ? (
             <div className="flex flex-wrap gap-1.5">
               {lane.toolCalls.map((c) => (
                 <ToolChip key={c.id} call={c} />
               ))}
+              {lane.selectorRecoveryCount && lane.selectorRecoveryCount > 0 ? (
+                <SelectorRecoveryChip count={lane.selectorRecoveryCount} />
+              ) : null}
             </div>
           ) : null}
           <ResultPreview preview={lane.preview} />

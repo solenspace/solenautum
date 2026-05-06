@@ -163,4 +163,47 @@ describe("useTaskLanes", () => {
     rerender({ events: moreEvents });
     expect(result.current[0]?.startedAt).toBe(startedAt);
   });
+
+  it("counts selector_recovered events per lane", () => {
+    const events: SseEvent[] = [
+      _ev({
+        type: "task_start",
+        content: { url: "https://a", tier: "http" },
+        ..._BASE,
+        task_id: "t-1",
+        seq: 0,
+      } as SseEvent),
+      _ev({
+        type: "selector_recovered",
+        content: { domain: "a", purpose: "main_content", hit_count: 1 },
+        ..._BASE,
+        task_id: "t-1",
+        seq: 1,
+      } as SseEvent),
+      _ev({
+        type: "selector_recovered",
+        content: { domain: "a", purpose: "main_content", hit_count: 2 },
+        ..._BASE,
+        task_id: "t-1",
+        seq: 2,
+      } as SseEvent),
+      _ev({
+        type: "task_start",
+        content: { url: "https://b", tier: "stealth" },
+        ..._BASE,
+        task_id: "t-2",
+        seq: 3,
+      } as SseEvent),
+      _ev({
+        type: "selector_recovered",
+        content: { domain: "b", purpose: "main_content", hit_count: 1 },
+        ..._BASE,
+        task_id: "t-2",
+        seq: 4,
+      } as SseEvent),
+    ];
+    const { result } = renderHook(() => useTaskLanes("m-1", events));
+    expect(result.current[0]?.selectorRecoveryCount).toBe(2);
+    expect(result.current[1]?.selectorRecoveryCount).toBe(1);
+  });
 });

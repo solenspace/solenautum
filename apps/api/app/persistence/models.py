@@ -187,6 +187,10 @@ class SavedSelector(SQLModel, table=True):
     purpose: str = Field(max_length=64, index=True)
     payload: dict[str, Any] = Field(sa_column=Column(JSONB, nullable=False))
     hit_count: int = Field(default=0)
+    failure_count: int = Field(
+        default=0,
+        sa_column_kwargs={"server_default": text("0"), "nullable": False},
+    )
     last_used_at: datetime = Field(
         sa_column_kwargs={"server_default": text("now()")},
     )
