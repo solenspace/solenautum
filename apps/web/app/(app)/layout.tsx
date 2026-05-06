@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import { SidebarProvider } from "@/components/ui/sidebar";
 import { KeyboardShortcuts } from "@/shared/keyboard";
 import { CommandPalette } from "@/widgets/command-palette";
+import { DescriptionModeSlideover } from "@/widgets/description-mode-slideover";
 import { MissionSidebar } from "@/widgets/mission-sidebar";
 import { MultiUrlSlideover } from "@/widgets/multi-url-slideover";
 import { TopBar } from "@/widgets/top-bar";
@@ -32,6 +33,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
         </div>
         <CommandPalette />
         <MultiUrlSlideover />
+        <DescriptionModeSlideover />
         <KeyboardShortcuts />
       </div>
     </SidebarProvider>

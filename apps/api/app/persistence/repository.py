@@ -11,6 +11,7 @@ from app.persistence.db import require_user_id, transaction
 from app.persistence.models import (
     Mission,
     MissionMode,
+    MissionPhase,
     SavedSelector,
     Status,
     Task,
@@ -35,6 +36,7 @@ class MissionRepository:
         prompt: str,
         mode: MissionMode,
         robots_override: bool = False,
+        skip_approval: bool = False,
     ) -> Mission:
         user_id = require_user_id()
         async with transaction() as session:
@@ -43,6 +45,7 @@ class MissionRepository:
                 prompt=prompt,
                 mode=mode,
                 robots_override=robots_override,
+                skip_approval=skip_approval,
             )
             session.add(mission)
             await session.flush()
@@ -88,6 +91,46 @@ class MissionRepository:
             mission.status = status
             if status in {Status.SUCCEEDED, Status.FAILED, Status.CANCELLED}:
                 mission.finished_at = datetime.now(UTC)
+
+    async def set_phase(self, mission_id: uuid.UUID, phase: MissionPhase) -> None:
+        """Workflow position update — orthogonal to `status`. Description-mode
+        missions walk all four phases; URL-mode jumps `null → scraping → done`."""
+        user_id = require_user_id()
+        async with transaction() as session:
+            mission = (await session.exec(_owned_mission_stmt(mission_id, user_id))).first()
+            if mission is None:
+                return
+            mission.phase = phase
+
+    async def set_discovered_urls(self, mission_id: uuid.UUID, urls: list[dict[str, Any]]) -> None:
+        """Persist Tavily's result list verbatim. Immutable once written —
+        re-discovery would create a new mission row."""
+        user_id = require_user_id()
+        async with transaction() as session:
+            mission = (await session.exec(_owned_mission_stmt(mission_id, user_id))).first()
+            if mission is None:
+                return
+            mission.discovered_urls = urls
+
+    async def set_approved_urls(self, mission_id: uuid.UUID, urls: list[str]) -> None:
+        """User-approved subset of `discovered_urls`. Set once at approval-gate
+        submit; the runner reads this value to construct task rows."""
+        user_id = require_user_id()
+        async with transaction() as session:
+            mission = (await session.exec(_owned_mission_stmt(mission_id, user_id))).first()
+            if mission is None:
+                return
+            mission.approved_urls = urls
+
+    async def set_skip_approval(self, mission_id: uuid.UUID, value: bool) -> None:
+        """Per-mission flag honored by future re-search calls in the same
+        mission. No cross-mission persistence (Spec 12 scope)."""
+        user_id = require_user_id()
+        async with transaction() as session:
+            mission = (await session.exec(_owned_mission_stmt(mission_id, user_id))).first()
+            if mission is None:
+                return
+            mission.skip_approval = value
 
 
 class TaskRepository:

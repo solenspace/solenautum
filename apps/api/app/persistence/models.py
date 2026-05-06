@@ -38,6 +38,18 @@ class Tier(StrEnum):
     DYNAMIC = "dynamic"
 
 
+class MissionPhase(StrEnum):
+    """Description-mode workflow position. URL-mode missions move
+    `null → scraping → done`; description-mode walks the full chain.
+    Distinct from `Status` (lifecycle) which lives on the same row.
+    """
+
+    DISCOVERING = "discovering"
+    AWAITING_APPROVAL = "awaiting_approval"
+    SCRAPING = "scraping"
+    DONE = "done"
+
+
 class User(SQLModel, table=True):
     __tablename__ = "users"
 
@@ -85,6 +97,25 @@ class Mission(SQLModel, table=True):
     )
     cost_cents: int = Field(default=0)
     robots_override: bool = Field(default=False)
+    phase: MissionPhase | None = Field(
+        default=None,
+        sa_column=Column(
+            SAEnum(MissionPhase, name="mission_phase", values_callable=_enum_values),
+            nullable=True,
+        ),
+    )
+    skip_approval: bool = Field(
+        default=False,
+        sa_column_kwargs={"server_default": text("false"), "nullable": False},
+    )
+    discovered_urls: list[dict[str, Any]] | None = Field(
+        default=None,
+        sa_column=Column(JSONB, nullable=True),
+    )
+    approved_urls: list[str] | None = Field(
+        default=None,
+        sa_column=Column(JSONB, nullable=True),
+    )
     created_at: datetime = Field(
         sa_column_kwargs={"server_default": text("now()")},
     )

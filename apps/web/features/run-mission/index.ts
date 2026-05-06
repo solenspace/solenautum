@@ -1,5 +1,8 @@
 export { useMissionStore } from "./store";
+export { type ApprovalState, type SortBy, useApprovalState } from "./use-approval-state";
+export { useDiscoveredUrls } from "./use-discovered-urls";
 export { type LaneFocus, useLaneFocus } from "./use-lane-focus";
+export { useMissionPhase } from "./use-mission-phase";
 export { type MissionStreamState, useMissionStream } from "./use-mission-stream";
 export { type MissionSummary, useMissionSummary } from "./use-mission-summary";
 export { type MissionsByStatus, useMissions } from "./use-missions";

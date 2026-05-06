@@ -61,6 +61,10 @@ class Settings(BaseSettings):
         alias="LANGFUSE_HOST",
     )
 
+    # Tavily search provider. Optional so URL-mode-only deployments boot without it;
+    # description-mode missions raise at first use when unset.
+    tavily_api_key: str | None = Field(default=None, alias="TAVILY_API_KEY")
+
     @property
     def allowlist_patterns(self) -> tuple[str, ...]:
         if not self.autumn_url_allowlist:

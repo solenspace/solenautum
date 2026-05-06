@@ -28,14 +28,29 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Sequence
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Literal
 from uuid import UUID
 
-from app.agent import MissionDeps, MissionResult, build_agent
+from app.agent import (
+    DiscoveryDeps,
+    DiscoveryMissionResult,
+    MissionDeps,
+    MissionResult,
+    build_agent,
+    build_discovery_agent,
+)
 from app.concurrency import MissionSemaphores, with_mission_semaphores
 from app.llm import GroqProvider, LLMProviderChain, OpenRouterProvider
 from app.observability import start_mission_trace
-from app.persistence.models import Mission, MissionMode, Status, Task, Tier
+from app.persistence.models import (
+    Mission,
+    MissionMode,
+    MissionPhase,
+    Status,
+    Task,
+    Tier,
+)
 from app.persistence.repository import MissionRepository, TaskRepository
 from app.runner_helpers import (
     compute_mission_status_from_db,
@@ -122,6 +137,9 @@ class MissionRunner:
 
         final_status = await compute_mission_status_from_db(self._mission.id, self._tasks_repo)
         await self._missions_repo.update_status(self._mission.id, final_status)
+        # Phase write precedes the terminal emit so a slide-over reattach
+        # observes the final phase before seeing `done` (invariant 7).
+        await self._missions_repo.set_phase(self._mission.id, MissionPhase.DONE)
         await emit_mission_terminal(emitter, mission_id=self._mission.id, status=final_status)
         trace.update(output={"status": final_status.value})
 
@@ -298,6 +316,9 @@ async def start_url_mission(*, user: CurrentUser, urls: Sequence[str]) -> UUID:
         mode=MissionMode.URL,
     )
     await missions_repo.update_status(mission.id, Status.RUNNING)
+    # URL-mode missions skip discovery; the dashboard treats every mission
+    # uniformly when `phase` is non-null.
+    await missions_repo.set_phase(mission.id, MissionPhase.SCRAPING)
 
     task_rows: list[Task] = []
     for url in urls:
@@ -309,5 +330,347 @@ async def start_url_mission(*, user: CurrentUser, urls: Sequence[str]) -> UUID:
         task_rows.append(row)
 
     runner = MissionRunner(user=user, mission=mission, tasks=task_rows)
+    await emitter.adopt_runner(mission.id, runner)
+    return mission.id
+
+
+# --- description-mode (Spec 12) -----------------------------------------
+
+
+_DEFAULT_APPROVAL_TIMEOUT_S = 1800.0
+
+
+@dataclass(slots=True)
+class _PendingApproval:
+    """In-memory approval state for one parked description-mode mission.
+
+    Lives in `_pending_approvals` keyed by `mission_id`. The runner sets
+    its `event` to wake; `submit_approval` carries the approved URL list
+    and persistence flag across the side-channel POST handoff.
+    """
+
+    event: asyncio.Event
+    approved_urls: list[str] | None = None
+    skip_approval_persisted: bool = False
+
+
+_pending_approvals: dict[UUID, _PendingApproval] = {}
+
+
+def register_pending_approval(mission_id: UUID) -> _PendingApproval:
+    """Allocate a fresh `_PendingApproval` and return the runner's handle.
+
+    Idempotent in the sense that re-registering replaces any stale entry —
+    a fresh discovery for the same mission_id is a Spec 14 concern, not
+    something this spec exercises.
+    """
+    req = _PendingApproval(event=asyncio.Event())
+    _pending_approvals[mission_id] = req
+    return req
+
+
+def submit_approval(
+    mission_id: UUID,
+    *,
+    approved_urls: list[str],
+    skip_approval: bool,
+) -> Literal["accepted", "no_pending"]:
+    """Carry the approved URL list across the SSE/REST boundary.
+
+    Returns `"no_pending"` if no in-memory entry exists for the mission
+    (the runner process restarted between discovery and approval). The
+    `/approve` route maps this to a 503 so the client can retry instead
+    of seeing a misleading 204. Returns `"accepted"` after setting the
+    event; the runner picks up `approved_urls` and resumes.
+    """
+    req = _pending_approvals.get(mission_id)
+    if req is None:
+        return "no_pending"
+    req.approved_urls = approved_urls
+    req.skip_approval_persisted = skip_approval
+    req.event.set()
+    return "accepted"
+
+
+async def wait_for_approval(mission_id: UUID, *, timeout_s: float) -> _PendingApproval | None:
+    """Block until `submit_approval` fires or the timeout elapses.
+
+    Returns the populated `_PendingApproval` on success, `None` on timeout.
+    Cleans up the registry entry in `finally` so a successive mission
+    cannot inherit stale approval state.
+    """
+    req = _pending_approvals.get(mission_id)
+    if req is None:
+        return None
+    try:
+        await asyncio.wait_for(req.event.wait(), timeout=timeout_s)
+    except TimeoutError:
+        return None
+    finally:
+        _pending_approvals.pop(mission_id, None)
+    return req
+
+
+@dataclass(slots=True)
+class DescriptionMissionRunner:
+    """Adapter satisfying `_RunnableMission` for `adopt_runner`.
+
+    `adopt_runner` accepts anything with `.run() -> Awaitable[None]`; this
+    dataclass wraps `run_description_mission` so the lifespan TaskGroup
+    can adopt the description-mode workflow the same way it adopts a
+    URL-mode `MissionRunner`.
+    """
+
+    user: CurrentUser
+    mission: Mission
+    query: str
+    approval_timeout_s: float = _DEFAULT_APPROVAL_TIMEOUT_S
+
+    async def run(self) -> None:
+        await run_description_mission(
+            user=self.user,
+            mission=self.mission,
+            query=self.query,
+            approval_timeout_s=self.approval_timeout_s,
+        )
+
+
+async def run_description_mission(
+    *,
+    user: CurrentUser,
+    mission: Mission,
+    query: str,
+    approval_timeout_s: float = _DEFAULT_APPROVAL_TIMEOUT_S,
+) -> None:
+    """Run a description-mode mission end-to-end.
+
+    Phases (each row write precedes its emit so invariant 7 holds):
+      1. `DISCOVERING` — call the discovery agent; emit per-result
+         `url_discovered` events from the tool body.
+      2. `AWAITING_APPROVAL` (skipped when `skip_approval=true`) — emit
+         `discovery_complete`, register a `_PendingApproval`, park.
+      3. `SCRAPING` — construct N task rows, hand to a `MissionRunner`,
+         which emits `task_start`/`task_end`/`done`.
+      4. `DONE` — set by `MissionRunner.run()` after the rolled-up
+         `done` event lands.
+
+    The whole body is wrapped in `try/except/finally` so a programming
+    error in any phase still emits a terminal `done`/`error` (invariant
+    5 at the mission level).
+    """
+    _current_user.set(user)
+    missions_repo = MissionRepository()
+    tasks_repo = TaskRepository()
+    chain = LLMProviderChain(
+        primary=OpenRouterProvider(),
+        fallback=GroqProvider(),
+    )
+
+    trace = start_mission_trace(
+        mission_id=mission.id,
+        user_id=user.user_id,
+        prompt=query,
+    )
+
+    terminal_emitted = False
+
+    async def _emit_error(code: str, message: str) -> None:
+        await emitter.emit(
+            SseEvent.model_validate(
+                {
+                    "type": "error",
+                    "content": {"code": code, "message": message},
+                    "mission_id": str(mission.id),
+                    "seq": 0,
+                }
+            )
+        )
+
+    async def _emit_done(status: Status) -> None:
+        nonlocal terminal_emitted
+        await emit_mission_terminal(emitter, mission_id=mission.id, status=status)
+        terminal_emitted = True
+
+    try:
+        await missions_repo.update_status(mission.id, Status.RUNNING)
+        await missions_repo.set_phase(mission.id, MissionPhase.DISCOVERING)
+
+        # --- discovery -------------------------------------------------
+        agent = build_discovery_agent()
+        deps = DiscoveryDeps(user_id=user.user_id, mission_id=mission.id)
+
+        async def _run(model: Any) -> Any:
+            return await agent.run(query, model=model, deps=deps)
+
+        try:
+            result = await chain.with_fallback(_run)
+        except Exception as exc:
+            log.exception(
+                "discovery.chain_failed",
+                extra={"mission_id": str(mission.id)},
+            )
+            await missions_repo.update_status(mission.id, Status.FAILED)
+            await _emit_error("discovery_failed", str(exc))
+            await _emit_done(Status.FAILED)
+            trace.update(output={"status": "failed", "phase": "discovering"})
+            return
+
+        discovery: DiscoveryMissionResult = result.output
+        if discovery.status == "error":
+            await missions_repo.update_status(mission.id, Status.FAILED)
+            await _emit_error(
+                discovery.error_code or "discovery_failed",
+                discovery.error_message or "discovery failed",
+            )
+            await _emit_done(Status.FAILED)
+            trace.update(output={"status": "failed", "phase": "discovering"})
+            return
+
+        # --- persist + emit discovery_complete -------------------------
+        await missions_repo.set_discovered_urls(
+            mission.id, [u.model_dump() for u in discovery.urls]
+        )
+
+        fresh = await missions_repo.get(mission.id)
+        awaiting = not (fresh and fresh.skip_approval)
+
+        if awaiting:
+            await missions_repo.set_phase(mission.id, MissionPhase.AWAITING_APPROVAL)
+
+        await emitter.emit(
+            SseEvent.model_validate(
+                {
+                    "type": "discovery_complete",
+                    "content": {
+                        "count": len(discovery.urls),
+                        "awaiting_approval": awaiting,
+                    },
+                    "mission_id": str(mission.id),
+                    "seq": 0,
+                }
+            )
+        )
+
+        # --- approval gate (or skip) ----------------------------------
+        approved_urls: list[str]
+        if awaiting:
+            register_pending_approval(mission.id)
+            approval = await wait_for_approval(mission.id, timeout_s=approval_timeout_s)
+            if approval is None or approval.approved_urls is None:
+                await missions_repo.update_status(mission.id, Status.CANCELLED)
+                await _emit_done(Status.CANCELLED)
+                trace.update(output={"status": "cancelled", "phase": "awaiting_approval"})
+                return
+            approved_urls = approval.approved_urls
+            if approval.skip_approval_persisted:
+                await missions_repo.set_skip_approval(mission.id, True)
+            await missions_repo.set_approved_urls(mission.id, approved_urls)
+        else:
+            approved_urls = [u.url for u in discovery.urls]
+            await missions_repo.set_approved_urls(mission.id, approved_urls)
+
+        if not approved_urls:
+            # No URLs survived approval — treat as cancelled (no work to do).
+            await missions_repo.update_status(mission.id, Status.CANCELLED)
+            await _emit_done(Status.CANCELLED)
+            trace.update(output={"status": "cancelled", "phase": "awaiting_approval"})
+            return
+
+        # --- scraping --------------------------------------------------
+        await missions_repo.set_phase(mission.id, MissionPhase.SCRAPING)
+        # Re-read so the inner runner observes the updated phase/approved_urls;
+        # the in-memory `mission` instance was created before discovery wrote.
+        latest = await missions_repo.get(mission.id)
+        runner_mission = latest if latest is not None else mission
+
+        task_rows: list[Task] = []
+        for url in approved_urls:
+            row = await tasks_repo.create(
+                mission_id=mission.id,
+                url=url,
+                tier_used=Tier.HTTP,
+            )
+            task_rows.append(row)
+
+        runner = MissionRunner(user=user, mission=runner_mission, tasks=task_rows)
+        await runner.run()
+        # MissionRunner.run() emits the mission-level `done` and writes
+        # `phase=DONE`; mark terminal_emitted so the finally block doesn't
+        # double-emit.
+        terminal_emitted = True
+    except asyncio.CancelledError:
+        # Re-raise after a terminal emit so the lifespan TaskGroup can
+        # propagate. `_shielded_run` (sse.py) catches the surrounding
+        # exception group and logs.
+        if not terminal_emitted:
+            try:
+                await missions_repo.update_status(mission.id, Status.CANCELLED)
+                await _emit_done(Status.CANCELLED)
+            except Exception:  # pragma: no cover — terminal-emit must not raise
+                log.exception(
+                    "description.terminal_emit_after_cancel_failed",
+                    extra={"mission_id": str(mission.id)},
+                )
+        raise
+    except Exception as exc:
+        log.exception(
+            "description.runner_unhandled",
+            extra={"mission_id": str(mission.id)},
+        )
+        if not terminal_emitted:
+            try:
+                await missions_repo.update_status(mission.id, Status.FAILED)
+                await _emit_error("agent_failed", str(exc))
+                await _emit_done(Status.FAILED)
+            except Exception:  # pragma: no cover
+                log.exception(
+                    "description.terminal_emit_after_error_failed",
+                    extra={"mission_id": str(mission.id)},
+                )
+    finally:
+        if not terminal_emitted:
+            # Defense in depth — invariant 5 at the mission level. If any
+            # path above slipped past without emitting a terminal, force
+            # one now so the slide-over doesn't hang forever.
+            try:
+                await missions_repo.update_status(mission.id, Status.FAILED)
+                await emit_mission_terminal(emitter, mission_id=mission.id, status=Status.FAILED)
+            except Exception:  # pragma: no cover
+                log.exception(
+                    "description.terminal_emit_in_finally_failed",
+                    extra={"mission_id": str(mission.id)},
+                )
+
+
+async def start_description_mission(
+    *,
+    user: CurrentUser,
+    query: str,
+    skip_approval: bool = False,
+    approval_timeout_s: float = _DEFAULT_APPROVAL_TIMEOUT_S,
+) -> UUID:
+    """Persist mission row; hand the description-mode runner off to the
+    lifespan-scoped TaskGroup; return mission_id immediately.
+
+    Mirrors `start_url_mission`'s contract — the row is written before
+    the runner runs, so the first SSE event has a backing row (invariant 7).
+    """
+    if not 1 <= len(query) <= 2000:
+        raise ValueError("query must contain between 1 and 2000 characters")
+
+    _current_user.set(user)
+    missions_repo = MissionRepository()
+    mission = await missions_repo.create(
+        prompt=query,
+        mode=MissionMode.DESCRIPTION,
+        skip_approval=skip_approval,
+    )
+
+    runner = DescriptionMissionRunner(
+        user=user,
+        mission=mission,
+        query=query,
+        approval_timeout_s=approval_timeout_s,
+    )
     await emitter.adopt_runner(mission.id, runner)
     return mission.id

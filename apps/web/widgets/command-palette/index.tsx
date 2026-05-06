@@ -1,7 +1,7 @@
 "use client";
 
 import { useClerk } from "@clerk/nextjs";
-import { Eye, Globe2, ListPlus, LogOut, PanelLeft } from "lucide-react";
+import { Eye, Globe2, ListPlus, LogOut, PanelLeft, Search } from "lucide-react";
 import { useState } from "react";
 
 import {
@@ -31,9 +31,13 @@ export function CommandPalette() {
   const recent = useRecentMissions();
   const openMission = useMissionStore((s) => s.openMission);
   const openMultiUrl = useMissionStore((s) => s.openMultiUrl);
+  const openDescription = useMissionStore((s) => s.openDescription);
   const { signOut } = useClerk();
 
   useShortcut(["cmd+k", "ctrl+k"], () => setOpen((value) => !value), { allowInInput: true });
+  useShortcut(["cmd+shift+d", "ctrl+shift+d"], () => openDescription(), {
+    allowInInput: true,
+  });
 
   function _focusUrlInput(): void {
     // The top-bar input is the only `type="url"` field in the shell.
@@ -84,6 +88,16 @@ export function CommandPalette() {
             <ListPlus className="h-3.5 w-3.5" />
             {t("mission", "newMultiUrlMission")}
             <CommandShortcut>⌘⇧N</CommandShortcut>
+          </CommandItem>
+          <CommandItem
+            onSelect={() => {
+              setOpen(false);
+              openDescription();
+            }}
+          >
+            <Search className="h-3.5 w-3.5" />
+            {t("mission", "newDescriptionMission")}
+            <CommandShortcut>⌘⇧D</CommandShortcut>
           </CommandItem>
           <CommandItem onSelect={() => setOpen(false)}>
             <Eye className="h-3.5 w-3.5" />

@@ -11,14 +11,15 @@ resuming a session.
 
 ## Current Goal
 
-- Implementing `specs/12-url-discovery-tavily.md` next. Spec 11 shipped:
-  the slide-over now renders the multi-lane stack with sticky aggregate
-  header (done / streaming / errored / elapsed), J/K lane navigation
-  with auto-expand, Enter/x pin/unpin, 1.5s succeeded auto-collapse, the
-  three-mode reasoning renderer (focused / tail / `…thinking` after 5s
-  idle), inline error chips, and a mobile single-lane swipe view with
-  status-dot strip. Mission-level `aria-live="polite"` covers milestone
-  announcements only; lane bodies stay `aria-live="off"`.
+- Implementing `specs/13-adaptive-selectors.md` next. Spec 12 shipped:
+  description-mode missions (Tavily-backed URL discovery + an inline
+  approval gate) now run end-to-end on the same SSE stream as URL-mode.
+  Two agents share the LLM-fallback chain (`build_discovery_agent` plus
+  the existing `build_agent`); the runner drives a four-phase state
+  machine (`discovering → awaiting_approval → scraping → done`) parked
+  on an `asyncio.Event` for the user's approval submit. The web
+  slide-over renders one of three child blocks based on the SSE-derived
+  phase: streaming discovery list, approval gate, or task-lane stack.
 
 ## Completed
 
@@ -558,16 +559,112 @@ resuming a session.
   14 files; `git ls-files apps/web/widgets/task-lane-card` returns
   empty.
 
+- **Spec 12 — url-discovery-tavily.** Adds the description-mode
+  mission flow end-to-end. **Search seam**: a new `app/search/` package
+  exposes `SearchProvider` Protocol and `DiscoveredUrl` pydantic v2
+  model; `TavilyProvider` is the only implementation today (raw `httpx`
+  POST against `https://api.tavily.com/search`, `max_results=20`,
+  `search_depth="basic"`, owned-client lifecycle). **Per-mission cost
+  cap** at three layers: discovery agent's system prompt instructs
+  exactly one call, `discover_urls` tool rejects a second call within
+  the same mission via a `contextvars.ContextVar[frozenset[UUID]]` (set
+  union, never `.add()` — copy-on-write keeps concurrent missions
+  isolated), and the provider clamps `max_results` server-side.
+  **Defense-in-depth SSRF**: `assert_safe_url` runs against every
+  Tavily-supplied URL inside `discover_urls` before the URL becomes a
+  `url_discovered` SSE event or lands in the `discovered_urls` jsonb
+  column — the `/approve` endpoint re-validates after user edits, and
+  any unsafe URL collapses to `DiscoveryFailure(reason="no_results")`
+  if all results are dropped. **Discovery agent** (`build_discovery_agent`
+  in `app/agent.py`) lives alongside the original `build_agent`; both
+  use `defer_model_check=True` so `LLMProviderChain` swaps providers
+  per-run. Output type `DiscoveryMissionResult` is the agent's
+  contract (pass `prompt-engineer`'s output_type rule). **Migration
+  `0002_add_mission_phase_and_skip_approval`** adds a `mission_phase`
+  enum and four mission columns (`phase`, `skip_approval`,
+  `discovered_urls`, `approved_urls`); RLS inheritance on the existing
+  `missions` row policy means no policy update was needed.
+  `start_url_mission` writes `phase=SCRAPING` before adopting the
+  runner; `MissionRunner.run` writes `phase=DONE` after the rolled-up
+  `done` emit so URL-mode and description-mode missions both populate
+  the column uniformly. **Approval registry** in `app/runner.py`:
+  `register_pending_approval` allocates an `asyncio.Event` keyed on
+  `mission_id`; `submit_approval` returns
+  `Literal["accepted", "no_pending"]` so the route can emit a 503
+  instead of silently 204'ing on post-restart orphan; the runner's
+  `wait_for_approval` is bounded by a kwarg-threaded `timeout_s`
+  (default 1800.0; tests pass `0.05`). `DescriptionMissionRunner`
+  dataclass adapter wraps `run_description_mission` so
+  `adopt_runner` (which expects `_RunnableMission.run() ->
+  Awaitable[None]`) accepts it without a Protocol relaxation.
+  **`run_description_mission` body** wraps the entire workflow in a
+  `try/except/finally` with a `terminal_emitted: bool` flag so any
+  programming error still emits a mission-level `done`/`error`
+  (invariant 5 at the mission level, beyond the inner `MissionRunner`'s
+  per-task guarantees). **Polymorphic `POST /missions`** uses a
+  pydantic discriminated union (`mode: Literal["url"|"description"]`)
+  with `mode="url"` defaulted so the existing single-array client
+  shape continues to parse; `POST /missions/{id}/approve` validates
+  ownership (RLS + repo lookup), phase (`AWAITING_APPROVAL`), and
+  SSRF on every URL. **SSE protocol**: `DiscoveryComplete` event
+  added to `schema.json` `oneOf` and `$defs`; codegen regenerated
+  TS + pydantic v2 RootModel. **Web**: a new `discovery` namespace
+  was rejected in favor of extending `mission`, `common`, and
+  `validation` (matching project convention); 16 keys total
+  including `_one`/`_other` plurals for `searching`,
+  `discoveryComplete`, `approveNUrls`. **CSS**: missing
+  `--state-warn` token added (`#9e8c3a` light / `#d4b856` dark per
+  `ui-context.md`) plus the `--color-state-warn: var(--state-warn)`
+  Tailwind bridge so `bg-state-warn` compiles. **Web hooks**:
+  `useMissionPhase(events)` derives the phase from the SSE event
+  stream; `useDiscoveredUrls(events, seed?)` reduces and de-dupes
+  `url_discovered` events; `useApprovalState(missionId,
+  discoveredUrls)` owns the gate's `Set<string>` selection,
+  `Record<string, string>` edits map, sort/filter, and the submit
+  POST. **`ApprovalGate` widget tree**: `index.tsx` orchestrator,
+  `url-row.tsx` (28px, ref+effect focus instead of `autoFocus` to
+  pass Biome a11y), `score-pill.tsx` (color band per `>= 0.8 / 0.5 /
+  <0.5`), `bulk-toolbar.tsx` (sticky bottom; Cmd+Enter primary),
+  `domain-filter-strip.tsx` (chip-strip, Esc clears),
+  `discovered-list.tsx` (read-only streaming list),
+  `discovery-header.tsx` (pulsing/static dot variant). The
+  description-mode form lives in
+  `apps/web/widgets/description-mode-slideover/index.tsx` —
+  single-textarea + skip-approval checkbox; opened from the command
+  palette ("New description-mode mission", `⌘⇧D` global shortcut)
+  and submitted via Cmd+Enter. **Slide-over state machine** lives at
+  `apps/web/app/(app)/missions/slide-over-content.tsx` (page-layer
+  composition, FSD-clean) — switches on `useMissionPhase` to render
+  the discovery list, the approval gate, the task-lane stack, or a
+  connecting placeholder. **BFF route** `app/api/missions/[id]/approve/
+  route.ts` (Node runtime; matches the SSE proxy) forwards the
+  approval body to the api. **Tests**: 4 new pytest files (29 tests:
+  `test_tavily_provider.py` 6, `test_discover_tool.py` 7,
+  `test_description_runner.py` 5 — DB-skip, `test_approval_endpoint.py`
+  6 — DB-skip; the SSE round-trip case for `discovery_complete` adds
+  3 to `test_sse_protocol.py`); 3 new Vitest files (24 tests:
+  `url-row.test.tsx` 9, `bulk-toolbar.test.tsx` 8,
+  `use-approval-state.test.ts` 7); plus the `discovery_complete`
+  case added to `packages/sse-protocol/tests/round-trip.test.ts`.
+  **Verification gate**: `turbo run lint` exits 0; `turbo run
+  typecheck` exits 0; `turbo run test` exits 0 (api 86 passed / 30
+  skipped, web 109 passed across 17 files, sse-protocol 10 passed);
+  `turbo run build` exits 0 — `/api/missions/[id]/approve` registered
+  in the Next route manifest. Open Question 2 (Tavily vs Exa) stays
+  open per the spec's Done-when list — revisit after real-world
+  quality data.
+
 ## In Progress
 
-- `specs/12-url-discovery-tavily.md` — next session. Spec 12 introduces
-  the description-mode mission flow (Tavily-backed URL discovery + the
-  user-approval gate); discovered URLs feed into Spec 11's existing
-  lane stack once tasks start.
+- `specs/13-adaptive-selectors.md` — next session. Spec 13 closes
+  the `SelectorRepository.upsert` SELECT-then-INSERT race
+  (Open Question 6) and ships the per-domain selector cache the
+  dynamic tier consults before falling back to full Playwright
+  rendering.
 
 ## Next Up
 
-- Implement `specs/12-url-discovery-tavily.md`. The remaining specs
+- Implement `specs/13-adaptive-selectors.md`. The remaining specs
   follow in numbered order; each spec's `Done when` checklist
   gates progress to the next.
 
@@ -1269,3 +1366,76 @@ RLS policy migration and verify cross-tenant isolation test."
   `turbo run build` exits 0; web Vitest 84 passed across 14 test
   files; `git ls-files apps/web/widgets/task-lane-card` returns
   empty. Next: Spec 12.
+- 2026-05-06: Spec 12 shipped on
+  `feature/spec-12-url-discovery-tavily`. Eleven deviations from
+  the spec text, each documented at the implementation site:
+  (1) **Skipped `uv add tavily-python`.** Spec section A says to
+  add the SDK but section C uses raw `httpx` and never imports
+  `tavily-python`. Adding an unused dep would fail simplify review.
+  (2) **Kept `build_agent` name** instead of renaming to
+  `build_scrape_agent` — the spec hedged in a parenthetical and the
+  rename would touch 7 callsites including 4 tests for cosmetic gain.
+  (3) **Renamed both `ApprovalRequest` collisions** to
+  `_PendingApproval` (runner) and `ApproveMissionRequest` (route);
+  the spec declared two same-named classes in modules that import
+  each other. (4) **`submit_approval` returns
+  `Literal["accepted", "no_pending"]`** so `/approve` can return 503
+  on post-restart orphan instead of silently 204'ing — the spec's
+  silent path lies to the client. (5) **30-min approval timeout is
+  threaded as a kwarg** through `start_description_mission` and
+  `run_description_mission` (default `1800.0`); tests pass `0.05`
+  rather than monkeypatching a module constant. (6) **`set_phase`
+  for URL-mode** — `start_url_mission` writes `SCRAPING` before
+  adopting the runner; `MissionRunner.run` writes `DONE` after the
+  rolled-up `done` emit. The spec text said URL-mode missions carry
+  `phase=scraping` but never showed the diff. (7) **Defense-in-depth
+  SSRF inside `discover_urls`** — every Tavily-supplied URL goes
+  through `assert_safe_url` before it becomes a `url_discovered`
+  event or lands in `discovered_urls` jsonb; unsafe URLs are
+  silently dropped, and an all-unsafe response collapses to
+  `DiscoveryFailure(reason="no_results")`. (8) **`run_description_mission`
+  has a top-level `try/except/finally` with a
+  `terminal_emitted: bool` flag** so any programming error still
+  emits a mission-level terminal `done`/`error` (invariant 5 at the
+  mission level beyond the inner runner's per-task guarantees).
+  (9) **`DescriptionMissionRunner` adapter dataclass** wraps the
+  coroutine so `adopt_runner` (which expects `_RunnableMission.run()`)
+  accepts it without Protocol relaxation. (10) **Snake-case
+  `mission_id` response shape** in `submitDescription`, not the
+  `missionId` shown in spec section K — matches the existing BFF
+  contract (`submitMany` reads `mission_id`). (11) **Added missing
+  `--state-warn` token** to `globals.css` (light `#9e8c3a` / dark
+  `#d4b856` per `ui-context.md`) plus the `--color-state-warn:
+  var(--state-warn)` Tailwind bridge — without these, `bg-state-warn`
+  in the score pill wouldn't compile. **Engineering details worth
+  recording**: (a) The `_discovery_called` ContextVar uses
+  `frozenset[UUID]` with set-union (never `.add()`) so the per-task
+  context inheritance stays copy-on-write — concurrent missions
+  observe independent caps. (b) Round-trip tests in both languages
+  ship before the runner code that emits `discovery_complete`,
+  because the pydantic v2 RootModel rejects unknown discriminator
+  values; schema-first ordering is mandatory. (c) The new
+  `mission_phase` enum is created via `postgresql.ENUM(...).create()`
+  + `create_type=False` on the column add, mirroring how alembic
+  expects enum types referenced from `op.add_column`. (d) The web
+  app's `entities/mission/types.ts` had `MissionMode = "url" |
+  "description"` already (Spec 05 typed-but-unimplemented); Spec 12
+  finally exercises both arms. (e) `useApprovalState`'s
+  `toggleAll` fills the selection from a partial seed and only
+  empties on the next press — matches the spec's "selectAll →
+  deselectAll" label transition driven by `selectedCount ===
+  totalCount`. (f) Vitest's accessible-name match against the
+  Approve button required matching the prefix only (`/^Approve 1
+  URL/`) because the trailing `Kbd` ("⌘↩") joins the accessible
+  name. (g) `next typegen` is required after adding a route file
+  for `tsc --noEmit` to recognize the new `RouteContext` literal —
+  Next 16 doesn't auto-watch under bare typecheck. **Verification
+  gate**: `turbo run lint` exits 0; `turbo run typecheck` exits 0
+  (mypy strict + tsc strict, with the generated `SseEvent`
+  discriminated union narrowing on `discovery_complete`); `turbo
+  run test` exits 0 (api 86 passed / 30 skipped, web 109 passed
+  across 17 files, sse-protocol 10 passed); `turbo run build`
+  exits 0 with `/api/missions/[id]/approve` registered.
+  Open Question 2 (Tavily vs Exa) stays open per the spec's
+  Done-when checklist — revisit after real-world quality data.
+  Next: Spec 13.
