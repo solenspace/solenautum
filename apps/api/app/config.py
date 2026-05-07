@@ -65,6 +65,10 @@ class Settings(BaseSettings):
     # description-mode missions raise at first use when unset.
     tavily_api_key: str | None = Field(default=None, alias="TAVILY_API_KEY")
 
+    # Log renderer. `json` (production) emits one structured line per event;
+    # `console` (development) emits a human-readable, colorless format.
+    log_format: Literal["json", "console"] = Field(default="json", alias="LOG_FORMAT")
+
     @property
     def allowlist_patterns(self) -> tuple[str, ...]:
         if not self.autumn_url_allowlist:

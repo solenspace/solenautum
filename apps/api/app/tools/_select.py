@@ -21,9 +21,10 @@ page on most sites.
 
 from __future__ import annotations
 
-import logging
 from typing import Any
 from uuid import UUID
+
+import structlog
 
 from app.persistence.repository import SelectorRepository
 from app.persistence.selector_cache import cache_put
@@ -31,7 +32,7 @@ from app.sse import emitter
 from app.tools._purposes import SelectorPurpose
 from autumn_sse_protocol import SseEvent
 
-log = logging.getLogger(__name__)
+log = structlog.get_logger()
 
 
 # Comma-list of common main-content patterns. Scrapling's `.css()` returns
@@ -102,11 +103,9 @@ async def select_main_content(
             new_failure_count = await repo.bump_failure_count(domain, purpose)
             log.info(
                 "select_main_content.adaptive_miss",
-                extra={
-                    "domain": domain,
-                    "purpose": purpose,
-                    "failure_count": new_failure_count,
-                },
+                domain=domain,
+                purpose=purpose,
+                failure_count=new_failure_count,
             )
 
     # Mirror Scrapling's most-recent save to Postgres so the next process

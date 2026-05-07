@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import time
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable
@@ -11,9 +10,11 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 from uuid import UUID
 
+import structlog
+
 from autumn_sse_protocol import SseEvent
 
-log = logging.getLogger(__name__)
+log = structlog.get_logger()
 
 _HEARTBEAT_INTERVAL_S = 15
 _BUFFER_CAPACITY = 200
@@ -93,11 +94,9 @@ class SseEmitter:
             except asyncio.QueueFull:
                 log.warning(
                     "sse.queue_full",
-                    extra={
-                        "mission_id": str(mission_id),
-                        "seq": seq,
-                        "type": payload.get("type"),
-                    },
+                    mission_id=str(mission_id),
+                    seq=seq,
+                    type=payload.get("type"),
                 )
 
     @asynccontextmanager
@@ -293,7 +292,7 @@ async def _shielded_run(mission_id: UUID, runner: _RunnableMission) -> None:
     except Exception:
         log.exception(
             "mission.runner_unhandled_error",
-            extra={"mission_id": str(mission_id)},
+            mission_id=str(mission_id),
         )
     finally:
         emitter._release_runner(mission_id)

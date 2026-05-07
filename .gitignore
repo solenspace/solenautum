@@ -1,5 +1,14 @@
 # Claude Code
 .claude/settings.local.json
+.claude/scheduled_tasks.lock
+
+# Playwright
+apps/web/playwright-report/
+apps/web/test-results/
+apps/web/blob-report/
+
+# Docker (local-extraction artifacts only; nothing checked-in)
+*.dockerblob
 
 # Node / pnpm
 node_modules/

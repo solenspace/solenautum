@@ -7,20 +7,15 @@ resuming a session.
 
 ## Current Phase
 
-- Implementation phase begins.
+- Shipping. All 15 specs landed.
 
 ## Current Goal
 
-- Implementing `specs/14-cost-and-mission-lifecycle.md` next. Spec 13
-  shipped: every tier tool now runs Scrapling's adaptive matcher for
-  the `MAIN_CONTENT` purpose between fetch and Crawl4AI extraction; a
-  1k-entry process-local LRU sits in front of `saved_selectors`,
-  write-through to Postgres on every successful save; three-strikes
-  failure-count + 30-day TTL sweep + LRU bound keep the table healthy.
-  Adaptive recoveries emit `selector_recovered` SSE events that the web
-  multi-lane stack renders as an inline "N selectors recovered" chip
-  next to the tool chips. Open Question 6 closed: `SelectorRepository.upsert`
-  now uses Postgres `INSERT … ON CONFLICT DO UPDATE`.
+- All implementation specs (01–15) are complete. Autumn is feature-
+  complete in dev and deployable to Fly.io (api) + Vercel (web). Next
+  phase is real-world traffic, observability tuning, and whatever
+  product feedback surfaces. Outstanding deferred work lives in Open
+  Questions; nothing in the implementation phase is unresolved.
 
 ## Completed
 
@@ -837,12 +832,134 @@ resuming a session.
   21 files, api 86 passed / 66 skipped — the new DB-gated tests join
   the existing skipped set); `turbo run build` exits 0.
 
+- **Spec 15 — hardening-and-e2e.** Final spec; takes Autumn from
+  feature-complete in dev to deployable on Fly.io + Vercel with
+  end-to-end coverage. **Structured logging**: `structlog` replaces
+  every `import logging` call in `apps/api/app/**` (8 modules — observability,
+  sse, runner, llm/chain, llm/probe, tools/_select, jobs/orphan_reaper,
+  jobs/selector_sweep). New `apps/api/app/logging.py` owns
+  `configure_logging()`; called from `app/main.py` at module import time
+  before FastAPI construction. JSON renderer in production
+  (`LOG_FORMAT=json` default), `ConsoleRenderer(colors=False)` for
+  dev. `uvicorn.access` log silenced. Per-task `mission_id` / `task_id`
+  bound via `structlog.contextvars.bound_contextvars(...)` wrapping the
+  body of `MissionRunner._run_task` — every log line emitted from
+  inside that scope (including from nested tools, LLM chain, SSE
+  emitter) carries both ids without threading them through every call
+  site. **Liveness + readiness split**: `/health` (cheap, always 200)
+  and `/health/ready` (Postgres `SELECT 1` in 0.5s, blob backend
+  reachable in 1s, Clerk Backend API health in 2s). `_check_blob_store`
+  branches on `R2BlobStore` vs `LocalFsBlobStore`; the R2 case runs
+  `head_bucket` via `asyncio.to_thread` (boto3 sync). Total worst-case
+  3.5s — under Fly's 5s probe `timeout`. Returns 503 with per-component
+  `checks: {...}` body when any dep is down. **Container image**:
+  `apps/api/Dockerfile` on `pyd4vinci/scrapling:latest` (Playwright +
+  Chromium preinstalled, ~5min saved per build). Pulls `uv` from its
+  own image (no curl bootstrap). Splits `uv sync` into two passes —
+  `--no-install-project` for cached dep layer, then `--no-editable` once
+  source is on disk — so code-only changes reuse the resolver layer.
+  CMD pins `--workers 1` (invariant-load-bearing: lifespan TaskGroup is
+  process-local). `apps/api/.dockerignore` keeps `.venv`, `data/`,
+  test suites out of the image. **Build context**: monorepo root,
+  *not* `apps/api/`, because `pyproject.toml` declares
+  `autumn-sse-protocol` as a workspace dep at
+  `../../packages/sse-protocol/generated/python` — that path must
+  resolve at `uv sync` time. Local: `docker build -t autumn-api -f
+  apps/api/Dockerfile .`; Fly: `fly deploy --config apps/api/fly.toml`
+  from monorepo root. **fly.toml**: single-region (iad), shared-CPU /
+  1GB, `auto_stop_machines = "stop"` for free-tier cost discipline,
+  `[[http_service.checks]]` pointed at `/health/ready`. **vercel.json**:
+  monorepo-aware `installCommand` + `buildCommand` reaching back to
+  the repo root for the Turbo cache. **Playwright e2e**:
+  `apps/web/playwright.config.ts` boots both servers (web on 3000, api
+  on 8000) via `webServer: [...]`. `tests/e2e/global-setup.ts` boots a
+  fixture HTTP server on `:9999` and calls `clerkSetup()` from
+  `@clerk/testing/playwright`. `tests/e2e/mission-flow.spec.ts` covers
+  two flows: 5-URL mission renders end-to-end (5 lanes reach
+  `succeeded`); forced disconnect mid-stream surfaces "Reconnecting…"
+  then resumes via `Last-Event-ID`. `setupClerkTestingToken({ page })`
+  bypasses sign-in via Clerk's official testing token — zero
+  production DOM pollution. Tests `test.skip()` unless `AUTUMN_E2E=1`
+  is set so casual `pnpm e2e` doesn't flake on missing infra.
+  **pytest API integration**: `apps/api/tests/integration/` with
+  `__init__.py`, `conftest.py` (three fixtures: `fake_user`,
+  `seeded_user`, `asgi_client` plus `stub_url_mode_pipeline`,
+  `stub_description_mode_pipeline`, `_FakeScrapeAgent`,
+  `_FakeDiscoveryAgent`, `_FakeChain`), and `test_mission_lifecycle.py`
+  (3 tests: 5-URL event sequence, 5-URL DB persistence,
+  description-mode full lifecycle). Real FastAPI app via
+  `httpx.ASGITransport`; lifespan TaskGroup bound via
+  `app.router.lifespan_context(app)`. SSE consumer pattern uses
+  `aiter_text` + buffered `\n\n` split — handles half-frame chunks.
+  **Ops doc**: spec listed `RUNBOOK.md` at repo root as a deliverable,
+  but the user rejected it on sight per the no-root-level-docs rule.
+  Ops content is captured here in the progress tracker and inline in
+  commit / PR descriptions instead. **Spec divergences from the original text**:
+  (1) Spec assumed `from app.persistence.db import _engine`; actual
+  export is `_get_engine()` factory (lazy `lru_cache`'d). Used the
+  factory. (2) Spec's `_head_bucket` used `blob._client.meta.config.region_name`
+  as the bucket parameter — that is `"auto"`, not the bucket. Fixed
+  to `blob._bucket`, with `LocalFsBlobStore` branch checking
+  `_root.exists()`. (3) Spec's `https://api.clerk.com/.well-known/jwks.json`
+  is a 404 (per-instance JWKS lives on the Frontend API, not the
+  central Backend API). Switched to `https://api.clerk.com/v1/health`
+  which is Clerk's documented public health endpoint (200). (4) Spec
+  proposed `[data-testid="clerk-test-sign-in"]` for Playwright sign-in;
+  switched to `@clerk/testing/playwright`'s `setupClerkTestingToken`
+  (Clerk's official testing pattern, zero production DOM changes).
+  (5) Spec's Playwright config booted only the web server; added a
+  second `webServer` entry for the api on `:8000`. (6) Spec's `uv sync`
+  step in the Dockerfile failed because the project tries to install
+  itself before code is copied; split into `--no-install-project` +
+  `--no-editable` passes. (7) Spec's `docker build apps/api` context
+  cannot reach `packages/sse-protocol/`; flipped the build context to
+  the monorepo root. **Carry-forward**: Q11 (lxml/scrapling pin),
+  Q12 (mission-level deadline guard), Q13 (`tier_used` post-escalation),
+  Q14 (architecture.md doc drift) deferred to post-MVP per spec
+  §Out-of-Scope. **Post-review simplify pass**: parallel reuse +
+  quality + efficiency reviewers caught four follow-ups. (1) Fixture
+  HTTP server in `apps/web/tests/e2e/global-setup.ts` had no teardown
+  — `globalSetup` now returns an async teardown that closes the
+  server. (2) `_check_blob_store` in `app/main.py` reached into
+  `R2BlobStore._client` / `_bucket` and `LocalFsBlobStore._root` —
+  added an abstract `BlobStore.health_check()` method on the ABC,
+  implemented per-backend (`R2BlobStore.health_check` runs
+  `head_bucket` via `asyncio.to_thread`; `LocalFsBlobStore.health_check`
+  checks `_root.exists()`); the readiness route now passes
+  `get_blob_store().health_check` directly to `_safe_probe` — no
+  private-attr access at the readiness layer. (3) Three near-identical
+  `_probe_*` wrappers (each running its own `asyncio.timeout`)
+  collapsed into one `_safe_probe(name, timeout_s, body)` helper that
+  takes a callable, runs it under a bounded timeout, and returns
+  `(name, "ok" | "down")` — backed by a `ProbeStatus` Literal alias
+  for the stringly-typed status. (4) Integration `conftest.py`
+  duplicated `_FakeAgentResult` / `_FakeScrapeAgent` /
+  `_FakeDiscoveryAgent` / `_FakeChain` / `_fake_scrape` from existing
+  unit tests; extracted into `tests/_shared/fakes.py` with a public
+  surface (`FakeAgentResult`, `FakeScrapeAgent`, `FakeDiscoveryAgent`,
+  `FakeChain`, `make_http_scrape_stub`) and the integration suite
+  imports from there. The pre-existing per-file copies in
+  `test_run_mission_route.py` and `test_description_runner.py` are
+  out of scope for this spec; migrating them is a clean follow-up.
+  Comment cleanup: ruthless WHAT-comment trim across `app/main.py`,
+  `app/runner.py`, `app/logging.py`, `apps/api/Dockerfile`, and
+  `apps/web/playwright.config.ts` — kept WHY (constraints, hidden
+  invariants), removed narration. **Verification gate**: `turbo run
+  lint` exits 0;
+  `turbo run typecheck` exits 0; `turbo run test` exits 0 (web 126/126,
+  api 86 passed + 69 skipped including 3 new DB-gated integration
+  tests); structlog config emits canonical JSON
+  (`{"event":..., "level":..., "timestamp":..., "mission_id":...,
+  "task_id":...}`); `/health` returns 200; `/health/ready` returns
+  503 with per-component `checks` body when DB is down (postgres:
+  "down", blob: "ok", clerk: "ok"). Named-agent gates:
+  `scrape-pipeline-doctor` zero invariant violations,
+  `sse-streaming-reviewer` zero issues, `fsd-architect` zero layer
+  violations.
+
 ## In Progress
 
-- `specs/15-hardening-and-e2e.md` — Spec 14 fully landed (cancellation
-  endpoints + cost write-back + orphan reaper + snapshot redirect +
-  sidebar awaiting_approval bucket + cost cell). Spec 15 picks up the
-  hardening pass + e2e + production deploy.
+- None. All 15 specs landed; the implementation phase is complete.
 
 ## Open Questions
 

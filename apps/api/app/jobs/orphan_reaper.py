@@ -19,12 +19,13 @@ scope for Spec 14.
 from __future__ import annotations
 
 import asyncio
-import logging
 from datetime import UTC, datetime, timedelta
+
+import structlog
 
 from app.persistence.repository import MissionRepository
 
-log = logging.getLogger(__name__)
+log = structlog.get_logger()
 
 
 _SWEEP_INTERVAL_S = 5 * 60  # 5 minutes
@@ -50,7 +51,7 @@ async def orphan_reaper_loop(
             cutoff = datetime.now(UTC) - orphan_age
             count = await repo.reap_orphans(cutoff=cutoff)
             if count > 0:
-                log.info("orphan_reaper.reaped", extra={"count": count})
+                log.info("orphan_reaper.reaped", count=count)
         except asyncio.CancelledError:
             return
         except Exception:

@@ -8,11 +8,12 @@ DB read can't take down the loop, but lets `CancelledError` propagate.
 from __future__ import annotations
 
 import asyncio
-import logging
+
+import structlog
 
 from app.persistence.repository import SelectorRepository
 
-log = logging.getLogger(__name__)
+log = structlog.get_logger()
 
 
 _SWEEP_INTERVAL_S = 6 * 3600  # 6 hours
@@ -35,7 +36,7 @@ async def selector_sweep_loop(
             await asyncio.sleep(interval_s)
             count = await repo.evict_older_than(days=ttl_days)
             if count > 0:
-                log.info("selector_sweep.evicted", extra={"count": count})
+                log.info("selector_sweep.evicted", count=count)
         except asyncio.CancelledError:
             return
         except Exception:

@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import logging
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, TypeVar
 
 import httpx
+import structlog
 from pydantic_ai.exceptions import ModelHTTPError
 
 from app.observability import emit_provider_switch
@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
 T = TypeVar("T")
 
-log = logging.getLogger(__name__)
+log = structlog.get_logger()
 
 
 def _status_code(exc: BaseException) -> int | None:
@@ -52,12 +52,9 @@ class LLMProviderChain:
             reason = "rate_limit" if status == 429 else "upstream_5xx"
             log.warning(
                 "llm.provider.fallback",
-                extra={
-                    "from": self._primary.name,
-                    "to": self._fallback.name,
-                    "reason": reason,
-                    "status_code": status,
-                },
+                reason=reason,
+                status_code=status,
+                **{"from": self._primary.name, "to": self._fallback.name},
             )
             emit_provider_switch(
                 from_=self._primary.name,
