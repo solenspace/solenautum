@@ -1,6 +1,11 @@
 "use client";
 
-import { useDiscoveredUrls, useMissionPhase, useMissionStream } from "@/features/run-mission";
+import {
+  useDiscoveredUrls,
+  useMissionPhase,
+  useMissionStore,
+  useMissionStream,
+} from "@/features/run-mission";
 import { useT } from "@/shared/i18n";
 import { ApprovalGate } from "@/widgets/approval-gate";
 import { DiscoveredList } from "@/widgets/approval-gate/discovered-list";
@@ -22,11 +27,17 @@ import { TaskLaneStack } from "@/widgets/task-lane-stack";
  * (FSD: widgets cannot import sibling widgets); the page is the single
  * place that knows how the mission detail body is assembled.
  */
-export function SlideOverContent({ missionId }: { missionId: string }) {
+export function SlideOverContent() {
   const t = useT();
-  const stream = useMissionStream(missionId);
+  const missionId = useMissionStore((s) => s.openMissionId);
+  // Hooks must run unconditionally — pass an empty id when no mission is
+  // open; the wrapping `MissionDetailSlideover` only renders this body
+  // when `openMissionId` is non-null, so the empty branch never paints.
+  const stream = useMissionStream(missionId ?? "");
   const phase = useMissionPhase(stream.events);
   const discovered = useDiscoveredUrls(stream.events);
+
+  if (!missionId) return null;
 
   if (phase === "discovering") {
     return (

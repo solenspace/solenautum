@@ -45,3 +45,4 @@ Thumbs.db
 
 # Local snapshot store (LocalFsBlobStore dev/test backend)
 apps/api/data/
+.playwright-mcp/

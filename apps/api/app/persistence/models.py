@@ -8,7 +8,7 @@ from typing import Any
 
 from sqlalchemy import Column, Enum as SAEnum, ForeignKey, Index, String, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID
-from sqlmodel import Field, Relationship, SQLModel
+from sqlmodel import Field, SQLModel
 
 
 def _enum_values(enum_cls: type[PyEnum]) -> Sequence[str]:
@@ -58,8 +58,6 @@ class User(SQLModel, table=True):
     created_at: datetime = Field(
         sa_column_kwargs={"server_default": text("now()")},
     )
-
-    missions: list[Mission] = Relationship(back_populates="user")
 
 
 class Mission(SQLModel, table=True):
@@ -121,9 +119,6 @@ class Mission(SQLModel, table=True):
     )
     finished_at: datetime | None = None
 
-    user: User = Relationship(back_populates="missions")
-    tasks: list[Task] = Relationship(back_populates="mission")
-
     __table_args__ = (Index("ix_missions_user_id_status", "user_id", "status"),)
 
 
@@ -168,8 +163,6 @@ class Task(SQLModel, table=True):
     selector_cache_id: uuid.UUID | None = Field(default=None, foreign_key="saved_selectors.id")
     started_at: datetime | None = None
     finished_at: datetime | None = None
-
-    mission: Mission = Relationship(back_populates="tasks")
 
 
 class SavedSelector(SQLModel, table=True):

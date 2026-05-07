@@ -55,7 +55,13 @@ async def transaction() -> AsyncIterator[AsyncSession]:
     factory = _get_session_factory()
     async with factory() as session, session.begin():
         if user is not None:
-            await session.execute(text("SET LOCAL app.user_id = :uid").bindparams(uid=user.user_id))
+            # `SET LOCAL <name> = $1` is rejected by Postgres' parser
+            # (asyncpg `prepare` raises `syntax error at or near "$1"`).
+            # `set_config(name, value, is_local=true)` accepts a bound
+            # parameter and is the canonical equivalent.
+            await session.execute(
+                text("SELECT set_config('app.user_id', :uid, true)").bindparams(uid=user.user_id),
+            )
         yield session
 
 

@@ -3,28 +3,30 @@
 import { useState } from "react";
 
 import { useT } from "@/shared/i18n";
-
+import { useMissionStore } from "./store";
 import { useMissions } from "./use-missions";
 
 /**
  * Mission-level cancel control (Spec 14). Renders a text-button in the
  * slide-over header that issues `DELETE /api/missions/{id}` when the
- * mission is in `running`. The button hides itself for terminal /
+ * open mission is in `running`. The button hides itself for terminal /
  * pending missions; the polled `useMissions` state drives visibility
  * (5s polling is acceptable here — the SSE stream is the source of
  * truth for live UI but the cancel button only needs lifecycle
  * granularity, and reusing the polled state avoids opening a duplicate
  * `EventSource` for the same mission).
  *
- * After a successful DELETE the button does NOT auto-close the
- * slide-over — the user watches the cascading task cancellations land
- * in the lanes and closes the sheet themselves.
+ * Reads the open mission id from the store directly so the page can
+ * compose this as a `ReactNode` (no render-prop function across the
+ * RSC boundary).
  */
-export function CancelMissionButton({ missionId }: { missionId: string }) {
+export function CancelMissionButton() {
   const t = useT();
+  const missionId = useMissionStore((s) => s.openMissionId);
   const { missions } = useMissions();
   const [pending, setPending] = useState(false);
 
+  if (!missionId) return null;
   const mission = missions.find((m) => m.id === missionId);
   if (!mission || mission.status !== "running") return null;
 
@@ -34,7 +36,7 @@ export function CancelMissionButton({ missionId }: { missionId: string }) {
     try {
       await fetch(`/api/missions/${missionId}`, { method: "DELETE" });
     } catch {
-      // Network blip: the next click retries. The api-side cancel is
+      // Network blip: next click retries. The api-side cancel is
       // idempotent so a duplicate DELETE is harmless.
     } finally {
       setPending(false);
