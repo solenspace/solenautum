@@ -4,12 +4,12 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import delete as sa_delete, func, update
+from sqlalchemy import delete as sa_delete, func, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlmodel import col, select
 from sqlmodel.sql.expression import SelectOfScalar
 
-from app.persistence.db import require_user_id, transaction
+from app.persistence.db import require_user_id, system_transaction, transaction
 from app.persistence.models import (
     Mission,
     MissionMode,
@@ -94,6 +94,55 @@ class MissionRepository:
             mission.status = status
             if status in {Status.SUCCEEDED, Status.FAILED, Status.CANCELLED}:
                 mission.finished_at = datetime.now(UTC)
+
+    async def update_cost_cents(self, mission_id: uuid.UUID, cost_cents: int) -> None:
+        """Cache the rolled-up Langfuse cost on the mission row. Called by
+        the runner after the terminal status write so a slide-over reattach
+        observes the cost before the `done` event arrives (invariant 7).
+        """
+        user_id = require_user_id()
+        async with transaction() as session:
+            mission = (await session.exec(_owned_mission_stmt(mission_id, user_id))).first()
+            if mission is None:
+                return
+            mission.cost_cents = cost_cents
+
+    async def reap_orphans(self, *, cutoff: datetime) -> int:
+        """Mark every mission stuck in `pending` or in
+        `running + awaiting_approval` past `cutoff` as `cancelled`.
+        Returns the number of rows reaped.
+
+        Cross-user system task — runs without a bound user, so it uses
+        `system_transaction()` to bypass RLS. Idempotent by design: a
+        second sweep finds zero matching rows because the first sweep
+        already moved them to `cancelled`. The implicit per-row lock from
+        `UPDATE ... RETURNING` serializes concurrent reaper runs without
+        needing an explicit advisory lock — Postgres holds the row lock
+        for the duration of the transaction.
+        """
+        async with system_transaction() as session:
+            result = await session.execute(
+                text(
+                    """
+                    UPDATE missions
+                    SET status = :cancelled, finished_at = now()
+                    WHERE (
+                        (status = :pending AND created_at < :cutoff)
+                     OR (status = :running
+                         AND phase = :awaiting_approval
+                         AND created_at < :cutoff)
+                    )
+                    RETURNING id
+                    """
+                ).bindparams(
+                    cutoff=cutoff,
+                    cancelled=Status.CANCELLED.value,
+                    pending=Status.PENDING.value,
+                    running=Status.RUNNING.value,
+                    awaiting_approval=MissionPhase.AWAITING_APPROVAL.value,
+                )
+            )
+            return len(list(result.all()))
 
     async def set_phase(self, mission_id: uuid.UUID, phase: MissionPhase) -> None:
         """Workflow position update — orthogonal to `status`. Description-mode

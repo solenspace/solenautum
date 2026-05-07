@@ -4,19 +4,21 @@ import uuid
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Header, HTTPException, Path, Request, status
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Header, HTTPException, Path, Request, Response, status
+from fastapi.responses import RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field, StringConstraints
 from svix.webhooks import Webhook, WebhookVerificationError
 
 from app.config import settings
+from app.persistence.blob import get_blob_store
 from app.persistence.models import Mission, MissionMode, MissionPhase, Status
-from app.persistence.repository import MissionRepository, UserRepository
+from app.persistence.repository import MissionRepository, TaskRepository, UserRepository
 from app.runner import (
     start_description_mission,
     start_url_mission,
     submit_approval,
 )
+from app.runner_helpers import emit_mission_terminal, emit_task_terminal
 from app.security import RequireUser, assert_safe_url, limiter
 from app.sse import emitter
 
@@ -234,6 +236,134 @@ async def approve_mission(
             "approval registry has no pending entry; the runner may have "
             "restarted — retry once the mission re-enters awaiting_approval",
         )
+
+
+@router.delete(
+    "/missions/{mission_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+@limiter.limit("60/minute")
+async def cancel_mission(
+    request: Request,  # noqa: ARG001 — slowapi keys off the `request` parameter
+    user: RequireUser,  # noqa: ARG001 — `RequireUser` binds the contextvar
+    mission_id: uuid.UUID = Path(...),
+) -> Response:
+    """Cancel a running mission.
+
+    Routes the cancellation to the live `MissionRunner` if one exists in
+    this process; pending tasks settle `CANCELLED` and in-flight tasks
+    finish their current network egress (architecture cancellation rule).
+
+    Idempotent: a second DELETE on a terminal mission returns 204 with an
+    `x-mission-state` header carrying the current status so the client
+    can stop polling. The rare-edge branch (no live runner, but the row
+    is still pending/running) writes the row to `CANCELLED` and also
+    emits a synthetic mission-level `done(cancelled)` so any client
+    attached to the stream within the 60s eviction grace observes the
+    terminal event (invariant 5 holds even on the no-runner branch).
+    """
+    mission = await _missions.get(mission_id)
+    if mission is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "mission not found")
+    if mission.status not in {Status.PENDING, Status.RUNNING}:
+        return Response(
+            status_code=status.HTTP_204_NO_CONTENT,
+            headers={"x-mission-state": mission.status.value},
+        )
+
+    runner = emitter.get_active_runner(mission_id)
+    if runner is not None and hasattr(runner, "request_cancellation"):
+        runner.request_cancellation()
+        return Response(
+            status_code=status.HTTP_204_NO_CONTENT,
+            headers={"x-mission-state": "cancellation_pending"},
+        )
+
+    # Rare edge: row says pending/running but no live runner. Write the
+    # row first (invariant 7) then flush a synthetic mission-level
+    # terminal so any in-grace listener stops waiting.
+    await _missions.update_status(mission_id, Status.CANCELLED)
+    await emit_mission_terminal(emitter, mission_id=mission_id, status=Status.CANCELLED)
+    return Response(
+        status_code=status.HTTP_204_NO_CONTENT,
+        headers={"x-mission-state": Status.CANCELLED.value},
+    )
+
+
+@router.delete(
+    "/missions/{mission_id}/tasks/{task_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+@limiter.limit("60/minute")
+async def cancel_task(
+    request: Request,  # noqa: ARG001 — slowapi keys off the `request` parameter
+    user: RequireUser,  # noqa: ARG001 — `RequireUser` binds the contextvar
+    mission_id: uuid.UUID = Path(...),
+    task_id: uuid.UUID = Path(...),
+) -> Response:
+    """Cancel a single task within a still-running mission.
+
+    Pending tasks (semaphore-waiting, not yet past `task_start`) exit
+    `Status.CANCELLED` immediately at the next per-task cancel checkpoint
+    inside `_run_task`. In-flight tasks (already past the agent dispatch)
+    finish their current network egress — the architecture cancellation
+    rule for tasks mirrors the mission-level rule. Idempotent.
+    """
+    tasks_repo = TaskRepository()
+    task = await tasks_repo.get(task_id)
+    if task is None or task.mission_id != mission_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "task not found")
+    if task.status not in {Status.PENDING, Status.RUNNING}:
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    runner = emitter.get_active_runner(mission_id)
+    if runner is not None and hasattr(runner, "cancel_task"):
+        runner.cancel_task(task_id)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    # Rare edge: the live runner isn't in this process. Mark the task
+    # cancelled (invariant 7) then flush a synthetic `task_end` so any
+    # in-grace listener stops waiting on this lane (invariant 5).
+    await tasks_repo.update(task_id, status=Status.CANCELLED)
+    await emit_task_terminal(
+        emitter,
+        mission_id=mission_id,
+        task_id=task_id,
+        status=Status.CANCELLED,
+    )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/missions/{mission_id}/tasks/{task_id}/snapshot")
+@limiter.limit("60/minute")
+async def task_snapshot(
+    request: Request,  # noqa: ARG001 — slowapi keys off the `request` parameter
+    user: RequireUser,  # noqa: ARG001 — `RequireUser` binds the contextvar
+    mission_id: uuid.UUID = Path(...),
+    task_id: uuid.UUID = Path(...),
+) -> RedirectResponse:
+    """Redirect to a 1-hour signed URL for the task's HTML snapshot.
+
+    Ownership is enforced at the application layer (the repository
+    lookup is `user_id`-scoped via the contextvar) with RLS as the
+    backstop. A missing snapshot returns 404 distinguishably from a
+    cross-tenant id (which also returns 404 — see `get_mission`).
+
+    The signed URL is generated fresh per request and never persisted
+    anywhere. For the local-fs blob backend (dev), `signed_url` returns
+    a `file://` URL that browsers refuse to follow; the web disables
+    the download link in dev to avoid a confusing dead-end.
+    """
+    tasks_repo = TaskRepository()
+    task = await tasks_repo.get(task_id)
+    if task is None or task.mission_id != mission_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "task not found")
+    if task.snapshot_key is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no snapshot for this task")
+
+    blob = get_blob_store()
+    url = await blob.signed_url(task.snapshot_key, expires_in_seconds=3600)
+    return RedirectResponse(url=url, status_code=status.HTTP_302_FOUND)
 
 
 @router.get("/missions")

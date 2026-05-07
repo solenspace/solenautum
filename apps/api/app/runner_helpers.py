@@ -143,3 +143,43 @@ _MISSION_STATUS_MAP: dict[Status, str] = {
     Status.FAILED: "failed",
     Status.CANCELLED: "cancelled",
 }
+
+
+_TASK_STATUS_MAP: dict[Status, str] = {
+    Status.SUCCEEDED: "succeeded",
+    Status.FAILED: "failed",
+    Status.CANCELLED: "cancelled",
+}
+
+
+async def emit_task_terminal(
+    emitter: SseEmitter,
+    *,
+    mission_id: UUID,
+    task_id: UUID,
+    status: Status,
+    content_extras: dict[str, Any] | None = None,
+) -> None:
+    """Emit a `task_end` SSE event for one task.
+
+    Centralizes the schema-shape so the runner's per-task path and the
+    rare-edge cancel-route path produce identical events. `content_extras`
+    optionally carries `preview` / `snapshot_key` / `latency_ms` for the
+    success path; the cancel paths pass nothing.
+    """
+    from autumn_sse_protocol import SseEvent
+
+    content: dict[str, Any] = {"status": _TASK_STATUS_MAP[status]}
+    if content_extras:
+        content.update(content_extras)
+    await emitter.emit(
+        SseEvent.model_validate(
+            {
+                "type": "task_end",
+                "content": content,
+                "mission_id": str(mission_id),
+                "task_id": str(task_id),
+                "seq": 0,
+            }
+        )
+    )

@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
+from app.jobs.orphan_reaper import orphan_reaper_loop
 from app.jobs.selector_sweep import selector_sweep_loop
 from app.llm.probe import probe_providers
 from app.routes import router as api_router
@@ -40,6 +41,10 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         # Spec 13: TTL sweep over `saved_selectors` runs every 6h. Owned
         # by the lifespan group so shutdown cancels it via CancelledError.
         tg.create_task(selector_sweep_loop(), name="selector-sweep")
+        # Spec 14: orphan-mission reaper runs every 5min and cancels
+        # missions stuck in pending or awaiting_approval past the 1h
+        # threshold. Same lifespan ownership as the selector sweep.
+        tg.create_task(orphan_reaper_loop(), name="orphan-reaper")
         yield
 
 

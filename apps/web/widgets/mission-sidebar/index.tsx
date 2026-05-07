@@ -6,10 +6,18 @@ import { useT } from "@/shared/i18n";
 
 import { MissionRow } from "./mission-row";
 
-const _GROUPS = ["running", "pending", "succeeded", "failed", "cancelled"] as const;
+const _GROUPS = [
+  "running",
+  "awaiting_approval",
+  "pending",
+  "succeeded",
+  "failed",
+  "cancelled",
+] as const;
 
 const _GROUP_LABEL = {
   running: "status_running",
+  awaiting_approval: "status_awaiting_approval",
   pending: "status_pending",
   succeeded: "status_succeeded",
   failed: "status_failed",

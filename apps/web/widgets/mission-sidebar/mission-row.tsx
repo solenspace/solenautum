@@ -31,8 +31,29 @@ function _relativeTime(iso: string): string {
   return `${days}d`;
 }
 
+/**
+ * Cost cell content (Spec 14):
+ * - `cost_cents > 0` — render `$X.XXX`.
+ * - `cost_cents === 0` on a terminal mission — render `?` to signal that
+ *   the Langfuse fetch failed or the mission genuinely had no LLM
+ *   spend. The column is `NOT NULL DEFAULT 0` on the api side so we
+ *   cannot distinguish "unknown" from "free" without an extra sentinel;
+ *   `?` covers both for users who care about cost.
+ * - Pre-terminal — render empty (cost only lands at the `done` event).
+ */
+function _formatCost(mission: MissionRowData): string {
+  if (mission.cost_cents > 0) {
+    return `$${(mission.cost_cents / 100).toFixed(3)}`;
+  }
+  if (mission.status === "succeeded" || mission.status === "failed") {
+    return "?";
+  }
+  return "";
+}
+
 export function MissionRow({ mission }: { mission: MissionRowData }) {
   const open = useMissionStore((s) => s.openMission);
+  const cost = _formatCost(mission);
   return (
     <button
       type="button"
@@ -46,6 +67,9 @@ export function MissionRow({ mission }: { mission: MissionRowData }) {
       <span className="flex-1 truncate font-mono text-[13px] text-foreground">
         {mission.prompt}
       </span>
+      {cost ? (
+        <span className="font-mono text-[11px] text-muted-foreground/70 tabular-nums">{cost}</span>
+      ) : null}
       <span className="font-mono text-[11px] text-muted-foreground/70 tabular-nums">
         {_relativeTime(mission.created_at)}
       </span>

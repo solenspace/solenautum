@@ -17,3 +17,25 @@ export async function GET(_request: NextRequest, ctx: RouteContext<"/api/mission
     headers: { "Content-Type": "application/json" },
   });
 }
+
+/**
+ * Cancel a running mission (Spec 14). Forwards the DELETE to the api,
+ * which routes the cancellation to the live `MissionRunner`. Idempotent:
+ * a second DELETE on a terminal mission returns 204 with the current
+ * status echoed in `x-mission-state` so the client can stop polling.
+ */
+export async function DELETE(_request: NextRequest, ctx: RouteContext<"/api/missions/[id]">) {
+  const { id } = await ctx.params;
+  const authorization = await authorizationOr401();
+  if (authorization instanceof Response) return authorization;
+
+  const upstream = await fetch(`${API_BASE}/missions/${id}`, {
+    method: "DELETE",
+    headers: { Authorization: authorization },
+  });
+  const headers: Record<string, string> = {};
+  const missionState = upstream.headers.get("x-mission-state");
+  if (missionState !== null) headers["x-mission-state"] = missionState;
+  const text = upstream.status === 204 ? "" : await upstream.text();
+  return new Response(text, { status: upstream.status, headers });
+}

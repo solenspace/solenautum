@@ -32,9 +32,11 @@ function _render(
       <ul>
         <TaskLaneRow
           lane={lane}
+          missionId="m-1"
           isFocused={props.isFocused}
           isPinned={props.isPinned}
           onFocus={() => {}}
+          onTogglePin={() => {}}
         />
       </ul>
     </I18nTestWrapper>,
@@ -107,7 +109,14 @@ describe("TaskLaneRow", () => {
     const { rerender } = render(
       <I18nTestWrapper>
         <ul>
-          <TaskLaneRow lane={_lane()} isFocused={false} isPinned={false} onFocus={() => {}} />
+          <TaskLaneRow
+            lane={_lane()}
+            missionId="m-1"
+            isFocused={false}
+            isPinned={false}
+            onFocus={() => {}}
+            onTogglePin={() => {}}
+          />
         </ul>
       </I18nTestWrapper>,
     );
@@ -115,7 +124,14 @@ describe("TaskLaneRow", () => {
     rerender(
       <I18nTestWrapper>
         <ul>
-          <TaskLaneRow lane={_lane()} isFocused={true} isPinned={false} onFocus={() => {}} />
+          <TaskLaneRow
+            lane={_lane()}
+            missionId="m-1"
+            isFocused={true}
+            isPinned={false}
+            onFocus={() => {}}
+            onTogglePin={() => {}}
+          />
         </ul>
       </I18nTestWrapper>,
     );
