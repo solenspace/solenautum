@@ -9,8 +9,9 @@ Covers:
 - Idempotency: a second DELETE on a terminal mission returns 204 with
   `x-mission-state` carrying the current status.
 - Rare edge: mission row says pending/running but no live runner — the
-  endpoint marks the row cancelled directly (no SSE emit by design;
-  the stream is also dead in that branch).
+  endpoint marks the row cancelled AND emits a synthetic mission-level
+  `done(cancelled)` so any client attached within the 60s eviction
+  grace observes the terminal event.
 - Invariant 5 under cancellation: a cancelled task emits exactly one
   `task_end` with status=cancelled.
 
