@@ -42,8 +42,9 @@ class _RunnableMission(Protocol):
     """Structural type for `MissionRunner` consumed by `adopt_runner`.
 
     Avoids the runner→sse→runner import cycle: the emitter only needs an
-    awaitable `run()`. Spec 14 will plug `request_cancellation()` through
-    a separate registry keyed on `mission_id`.
+    awaitable `run()`. The Spec 14 cancel endpoints reach in via
+    `SseEmitter.get_active_runner(mission_id)` and call
+    `request_cancellation()` / `cancel_task(task_id)` on the live runner.
     """
 
     def run(self) -> Awaitable[None]: ...
@@ -65,6 +66,11 @@ class SseEmitter:
         self._missions: dict[UUID, _MissionState] = {}
         self._lock = asyncio.Lock()
         self._lifespan_tg: asyncio.TaskGroup | None = None
+        # Spec 14: process-level registry of running mission runners so the
+        # cancel endpoints can route a request to the live `MissionRunner`
+        # without going through the DB. Populated by `adopt_runner`,
+        # cleaned up by `_shielded_run`'s `finally`.
+        self._active_runners: dict[UUID, _RunnableMission] = {}
 
     async def emit(self, event: SseEvent) -> None:  # type: ignore[no-any-unimported]
         """Validate the event, assign a monotonic `seq`, append to the ring
@@ -234,21 +240,53 @@ class SseEmitter:
         responsible for emitting per-task and mission-level terminal
         events; if it fails partway through, that's the bug we want to
         surface in logs and Langfuse, not an SSE blackout.
+
+        The runner is registered in `_active_runners` *before* the task
+        is scheduled so a `DELETE /missions/{id}` that arrives between
+        adoption and the runner's first `await` still finds the live
+        runner via `get_active_runner`.
         """
         if self._lifespan_tg is None:
             raise RuntimeError(
                 "lifespan TaskGroup not bound; call bind_lifespan_tg from "
                 "the FastAPI lifespan before serving traffic"
             )
+        self._register_runner(mission_id, runner)
         self._lifespan_tg.create_task(
             _shielded_run(mission_id, runner),
             name=f"mission:{mission_id}",
         )
 
+    def get_active_runner(self, mission_id: UUID) -> _RunnableMission | None:
+        """Return the live `_RunnableMission` for `mission_id` if the
+        runner is still in this process, else `None`. The Spec 14 cancel
+        endpoints use this to route `request_cancellation()` /
+        `cancel_task(task_id)` to the running coroutine.
+        """
+        return self._active_runners.get(mission_id)
+
+    def _register_runner(self, mission_id: UUID, runner: _RunnableMission) -> None:
+        """Add the runner to the active registry. Internal — only
+        `adopt_runner` calls this. A description-mode wrapper may
+        re-register itself here when its inner `MissionRunner` is
+        constructed mid-flight (so per-task cancels route through to
+        the inner coroutine).
+        """
+        self._active_runners[mission_id] = runner
+
+    def _release_runner(self, mission_id: UUID) -> None:
+        """Remove the runner from the active registry. Internal —
+        `_shielded_run`'s `finally` calls this once the runner returns,
+        whether normally or via an unhandled exception.
+        """
+        self._active_runners.pop(mission_id, None)
+
 
 async def _shielded_run(mission_id: UUID, runner: _RunnableMission) -> None:
     """Run a MissionRunner; log unhandled errors instead of letting them
-    abort the lifespan TaskGroup.
+    abort the lifespan TaskGroup. The `finally` clause releases the
+    runner from the registry so subsequent cancel requests fall through
+    to the rare-edge synthetic-terminal branch.
     """
     try:
         await runner.run()
@@ -257,6 +295,8 @@ async def _shielded_run(mission_id: UUID, runner: _RunnableMission) -> None:
             "mission.runner_unhandled_error",
             extra={"mission_id": str(mission_id)},
         )
+    finally:
+        emitter._release_runner(mission_id)
 
 
 emitter = SseEmitter()

@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronDown } from "lucide-react";
+import { ChevronDown, Pin, PinOff } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { laneStatusDotClass, type TaskLane } from "@/features/run-mission";
@@ -18,9 +18,16 @@ const _AUTO_COLLAPSE_DELAY_MS = 1_500;
 
 interface TaskLaneRowProps {
   lane: TaskLane;
+  /** Owning mission id — needed for the snapshot download href and any
+   * future per-task BFF call that originates inside the row. */
+  missionId: string;
   isFocused: boolean;
   isPinned: boolean;
   onFocus: () => void;
+  /** Toggle this lane's pinned state. Spec 14 moved the pin/unpin
+   * keyboard shortcut off `X` (now state-aware cancel-or-unpin) onto a
+   * small icon button on the row. */
+  onTogglePin: () => void;
 }
 
 /**
@@ -29,7 +36,14 @@ interface TaskLaneRowProps {
  * collapse window is driven by a single-shot `setTimeout` that flips
  * local state; no global timer subscription needed.
  */
-export function TaskLaneRow({ lane, isFocused, isPinned, onFocus }: TaskLaneRowProps) {
+export function TaskLaneRow({
+  lane,
+  missionId,
+  isFocused,
+  isPinned,
+  onFocus,
+  onTogglePin,
+}: TaskLaneRowProps) {
   const t = useT();
   const ref = useRef<HTMLLIElement>(null);
   const [hasAutoCollapsed, setHasAutoCollapsed] = useState(false);
@@ -89,6 +103,21 @@ export function TaskLaneRow({ lane, isFocused, isPinned, onFocus }: TaskLaneRowP
             {(lane.latencyMs / 1000).toFixed(1)}s
           </span>
         ) : null}
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onTogglePin();
+          }}
+          aria-label={isPinned ? t("mission", "unpin") : t("mission", "pin")}
+          className="text-muted-foreground transition-colors hover:text-foreground"
+        >
+          {isPinned ? (
+            <PinOff className="h-3.5 w-3.5" aria-hidden />
+          ) : (
+            <Pin className="h-3.5 w-3.5" aria-hidden />
+          )}
+        </button>
         <ChevronDown
           className={cn(
             "h-3.5 w-3.5 text-muted-foreground transition-transform",
@@ -123,7 +152,12 @@ export function TaskLaneRow({ lane, isFocused, isPinned, onFocus }: TaskLaneRowP
               ) : null}
             </div>
           ) : null}
-          <ResultPreview preview={lane.preview} />
+          <ResultPreview
+            preview={lane.preview}
+            missionId={missionId}
+            taskId={lane.taskId}
+            snapshotKey={lane.snapshotKey}
+          />
         </div>
       ) : null}
     </li>

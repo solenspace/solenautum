@@ -1,3 +1,4 @@
+export { CancelMissionButton } from "./cancel-mission-button";
 export { useMissionStore } from "./store";
 export { type ApprovalState, type SortBy, useApprovalState } from "./use-approval-state";
 export { useDiscoveredUrls } from "./use-discovered-urls";
@@ -8,4 +9,5 @@ export { type MissionSummary, useMissionSummary } from "./use-mission-summary";
 export { type MissionsByStatus, useMissions } from "./use-missions";
 export { useRecentMissions } from "./use-recent-missions";
 export { type SubmitMissionError, useSubmitMission } from "./use-submit-mission";
+export { useTaskCancel } from "./use-task-cancel";
 export { laneStatusDotClass, type TaskLane, type ToolCall, useTaskLanes } from "./use-task-lanes";

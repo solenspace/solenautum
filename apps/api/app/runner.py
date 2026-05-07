@@ -10,17 +10,21 @@ Per-mission semaphores (HTTP-20 / browser-3) layer over Spec 09's
 process-wide ceilings (60 / 8); tier tools resolve them via the
 `contextvars`-backed binding from `app.concurrency`.
 
-Cancellation mechanic (Spec 14 plugs a user-facing endpoint into this):
-- `request_cancellation()` sets an `asyncio.Event`.
-- Tasks check the event at entry; tasks that haven't started yet exit
-  with `Status.CANCELLED` instead of running the agent.
-- Tasks already mid-flight finish normally — pending cancellation is
-  not a mid-page-render kill (architecture decision in
-  `progress-tracker.md` Open Question 1).
-- If Spec 14 also calls `task.cancel()`, the resulting `CancelledError`
-  is observed in `_run_task`'s except clause: a terminal `task_end`
-  with `cancelled` status is emitted before the exception re-raises
-  (invariant 5).
+Cancellation mechanic (Spec 14 wires user-facing endpoints into this):
+- `request_cancellation()` sets a mission-wide `asyncio.Event`.
+- `cancel_task(task_id)` adds one task id to a per-task cancel set
+  (mission-level event stays untouched — other tasks keep running).
+- `_run_task` checks both flags at three step boundaries: entry,
+  immediately after `task_start` emission, and just before the agent
+  dispatch. A task cancelled at any boundary writes `Status.CANCELLED`
+  before emitting `task_end` (invariants 5 + 7).
+- Tasks already past the agent dispatch finish their network egress —
+  pending cancellation is not a mid-page-render kill (architecture
+  decision in `progress-tracker.md` Open Question 1).
+- If the lifespan TaskGroup itself cancels (process shutdown), the
+  resulting `CancelledError` is observed in `_run_task`'s except clause:
+  a terminal `task_end` with `cancelled` status is emitted before the
+  exception re-raises (invariant 5).
 """
 
 from __future__ import annotations
@@ -28,7 +32,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal
 from uuid import UUID
 
@@ -42,7 +46,7 @@ from app.agent import (
 )
 from app.concurrency import MissionSemaphores, with_mission_semaphores
 from app.llm import GroqProvider, LLMProviderChain, OpenRouterProvider
-from app.observability import start_mission_trace
+from app.observability import fetch_mission_cost_cents, start_mission_trace
 from app.persistence.models import (
     Mission,
     MissionMode,
@@ -55,6 +59,7 @@ from app.persistence.repository import MissionRepository, TaskRepository
 from app.runner_helpers import (
     compute_mission_status_from_db,
     emit_mission_terminal,
+    emit_task_terminal,
     last_ok_tool_call,
 )
 from app.security import CurrentUser, _current_user, assert_safe_url
@@ -82,6 +87,7 @@ class MissionRunner:
         self._tasks = tasks
         self._sems = MissionSemaphores.fresh()
         self._cancellation_requested = asyncio.Event()
+        self._cancelled_task_ids: set[UUID] = set()
         self._missions_repo = MissionRepository()
         self._tasks_repo = TaskRepository()
         self._chain = LLMProviderChain(
@@ -95,6 +101,26 @@ class MissionRunner:
         user-facing endpoint into this method.
         """
         self._cancellation_requested.set()
+
+    def cancel_task(self, task_id: UUID) -> None:
+        """Mark one task for cancellation without flipping the mission
+        event. Idempotent (set semantics). The task observes the flag at
+        the next step boundary in `_run_task` and exits `CANCELLED`.
+        """
+        self._cancelled_task_ids.add(task_id)
+
+    def _is_cancelled(self, task_id: UUID) -> bool:
+        return task_id in self._cancelled_task_ids or self._cancellation_requested.is_set()
+
+    async def _settle_cancelled(self, task: Task) -> None:
+        """Atomic cancel-then-emit for a single task: write
+        `Status.CANCELLED` to the row (invariant 7), then emit
+        `task_end(cancelled)` (invariant 5). Used by all three cancel
+        checkpoints in `_run_task` so the DB-before-SSE ordering
+        cannot drift between them.
+        """
+        await self._tasks_repo.update(task.id, status=Status.CANCELLED)
+        await self._emit_task_end(task, status=Status.CANCELLED)
 
     async def run(self) -> None:
         """Run all tasks under one TaskGroup; emit per-task and mission
@@ -135,12 +161,29 @@ class MissionRunner:
                     },
                 )
 
-        final_status = await compute_mission_status_from_db(self._mission.id, self._tasks_repo)
+        # Spec 14: status rollup and Langfuse cost lookup are independent
+        # reads — run them concurrently so the cost fetch's network
+        # round-trip overlaps with the per-task DB query. The cost helper
+        # bounds itself with a 5s deadline; a hung Langfuse degrades to
+        # `cost_cents = 0` and the sidebar renders `?` for terminal
+        # missions with zero cost.
+        final_status, cost_or_none = await asyncio.gather(
+            compute_mission_status_from_db(self._mission.id, self._tasks_repo),
+            fetch_mission_cost_cents(self._mission.id),
+        )
+        cost_cents = cost_or_none or 0
+        # Cost write precedes status / phase / SSE so a slide-over reattach
+        # observes both the cost and the final state before the `done`
+        # event arrives (invariant 7).
+        await self._missions_repo.update_cost_cents(self._mission.id, cost_cents)
         await self._missions_repo.update_status(self._mission.id, final_status)
-        # Phase write precedes the terminal emit so a slide-over reattach
-        # observes the final phase before seeing `done` (invariant 7).
         await self._missions_repo.set_phase(self._mission.id, MissionPhase.DONE)
-        await emit_mission_terminal(emitter, mission_id=self._mission.id, status=final_status)
+        await emit_mission_terminal(
+            emitter,
+            mission_id=self._mission.id,
+            status=final_status,
+            cost_cents=cost_cents,
+        )
         trace.update(output={"status": final_status.value})
 
     async def _run_task(self, task: Task) -> None:
@@ -155,20 +198,33 @@ class MissionRunner:
           egress so a cancellation between mission-row write and the
           first fetch doesn't race past the gate.
         """
-        if self._cancellation_requested.is_set():
-            await self._tasks_repo.update(task.id, status=Status.CANCELLED)
-            await self._emit_task_end(task, status=Status.CANCELLED)
+        # Boundary 1 — pre-start: task row is still PENDING. No `task_start`
+        # has been emitted; emitting `task_end` directly is the correct
+        # single terminal (invariant 5).
+        if self._is_cancelled(task.id):
+            await self._settle_cancelled(task)
             return
 
         # Invariant 7: task row was PENDING from `start_url_mission`.
         await self._tasks_repo.update(task.id, status=Status.RUNNING)
         await self._emit_task_start(task)
 
+        # Boundary 2 — between `task_start` and the invariant-10 fresh
+        # read. Cancels arriving in this window still settle terminally.
+        if self._is_cancelled(task.id):
+            await self._settle_cancelled(task)
+            return
+
         # Invariant 10: bail if the mission row is no longer RUNNING.
         fresh = await self._missions_repo.get(self._mission.id)
         if fresh is None or fresh.status != Status.RUNNING:
-            await self._tasks_repo.update(task.id, status=Status.CANCELLED)
-            await self._emit_task_end(task, status=Status.CANCELLED)
+            await self._settle_cancelled(task)
+            return
+
+        # Boundary 3 — final pre-agent check. After this we hand off to
+        # `agent.run`; in-flight cancels finish their network egress.
+        if self._is_cancelled(task.id):
+            await self._settle_cancelled(task)
             return
 
         deps = MissionDeps(
@@ -253,24 +309,19 @@ class MissionRunner:
         status: Status,
         ok_call: Any = None,
     ) -> None:
-        sse_status = _TASK_STATUS_MAP[status]
-        content: dict[str, Any] = {"status": sse_status}
+        extras: dict[str, Any] = {}
         if ok_call is not None:
-            content["preview"] = (ok_call.markdown or "")[:_PREVIEW_CHARS]
+            extras["preview"] = (ok_call.markdown or "")[:_PREVIEW_CHARS]
             if ok_call.snapshot_key:
-                content["snapshot_key"] = ok_call.snapshot_key
+                extras["snapshot_key"] = ok_call.snapshot_key
             if ok_call.latency_ms is not None:
-                content["latency_ms"] = ok_call.latency_ms
-        await emitter.emit(
-            SseEvent.model_validate(
-                {
-                    "type": "task_end",
-                    "content": content,
-                    "mission_id": str(self._mission.id),
-                    "task_id": str(task.id),
-                    "seq": 0,
-                }
-            )
+                extras["latency_ms"] = ok_call.latency_ms
+        await emit_task_terminal(
+            emitter,
+            mission_id=self._mission.id,
+            task_id=task.id,
+            status=status,
+            content_extras=extras or None,
         )
 
     async def _emit_error(self, task: Task, *, code: str, message: str) -> None:
@@ -285,13 +336,6 @@ class MissionRunner:
                 }
             )
         )
-
-
-_TASK_STATUS_MAP: dict[Status, str] = {
-    Status.SUCCEEDED: "succeeded",
-    Status.FAILED: "failed",
-    Status.CANCELLED: "cancelled",
-}
 
 
 async def start_url_mission(*, user: CurrentUser, urls: Sequence[str]) -> UUID:
@@ -411,7 +455,7 @@ async def wait_for_approval(mission_id: UUID, *, timeout_s: float) -> _PendingAp
     return req
 
 
-@dataclass(slots=True)
+@dataclass
 class DescriptionMissionRunner:
     """Adapter satisfying `_RunnableMission` for `adopt_runner`.
 
@@ -419,12 +463,63 @@ class DescriptionMissionRunner:
     dataclass wraps `run_description_mission` so the lifespan TaskGroup
     can adopt the description-mode workflow the same way it adopts a
     URL-mode `MissionRunner`.
+
+    Spec 14 also routes user cancellation through this wrapper — the
+    `cancel_mission` route looks the wrapper up via
+    `emitter.get_active_runner(...)` and calls `request_cancellation()` /
+    `cancel_task(task_id)` here. Both methods forward to the inner
+    URL-mode `MissionRunner` once it exists; before SCRAPING (during
+    DISCOVERING / AWAITING_APPROVAL) the wrapper wakes the parked
+    approval with an empty URL list so the run loop exits cleanly with
+    one terminal `done(cancelled)`.
     """
 
     user: CurrentUser
     mission: Mission
     query: str
     approval_timeout_s: float = _DEFAULT_APPROVAL_TIMEOUT_S
+    # `init=False` keeps the public constructor signature unchanged; the
+    # wrapper is mutated mid-flight via `set_inner_runner` and
+    # `request_cancellation`.
+    _inner_runner: MissionRunner | None = field(default=None, init=False, repr=False)
+    _cancellation_requested: bool = field(default=False, init=False, repr=False)
+
+    def request_cancellation(self) -> None:
+        """Cancel the mission. Forwards to the inner SCRAPING-phase
+        runner if present; otherwise wakes any parked approval gate. The
+        cancellation flag is also set so the run loop can re-check after
+        registering a pending approval (closes the race where a cancel
+        arrives between `submit_approval` returning `no_pending` and
+        `register_pending_approval` running).
+        """
+        self._cancellation_requested = True
+        if self._inner_runner is not None:
+            self._inner_runner.request_cancellation()
+            return
+        # Wake any parked approval (no-op if none registered yet). An
+        # empty `approved_urls` triggers the "no URLs survived approval"
+        # branch in `run_description_mission`, emitting one terminal
+        # `done(cancelled)` cleanly.
+        submit_approval(self.mission.id, approved_urls=[], skip_approval=False)
+
+    def cancel_task(self, task_id: UUID) -> None:
+        """Forward to the inner runner. No-op before the SCRAPING phase
+        — there are no per-task rows yet.
+        """
+        if self._inner_runner is not None:
+            self._inner_runner.cancel_task(task_id)
+
+    def set_inner_runner(self, runner: MissionRunner) -> None:
+        """Called by `run_description_mission` once the inner URL-mode
+        runner is constructed. After this, per-task and mission cancels
+        forward through to the inner runner's checkpoints rather than
+        wake-the-approval-gate.
+        """
+        self._inner_runner = runner
+
+    @property
+    def cancellation_requested(self) -> bool:
+        return self._cancellation_requested
 
     async def run(self) -> None:
         await run_description_mission(
@@ -432,6 +527,7 @@ class DescriptionMissionRunner:
             mission=self.mission,
             query=self.query,
             approval_timeout_s=self.approval_timeout_s,
+            wrapper=self,
         )
 
 
@@ -441,6 +537,7 @@ async def run_description_mission(
     mission: Mission,
     query: str,
     approval_timeout_s: float = _DEFAULT_APPROVAL_TIMEOUT_S,
+    wrapper: DescriptionMissionRunner | None = None,
 ) -> None:
     """Run a description-mode mission end-to-end.
 
@@ -555,6 +652,13 @@ async def run_description_mission(
         approved_urls: list[str]
         if awaiting:
             register_pending_approval(mission.id)
+            # Spec 14: a cancel that arrived between the wrapper's
+            # `submit_approval(no_pending)` and `register_pending_approval`
+            # would be lost without this re-check. Submitting an empty
+            # URL list after registration drops cleanly into the
+            # "no URLs survived approval" terminal branch below.
+            if wrapper is not None and wrapper.cancellation_requested:
+                submit_approval(mission.id, approved_urls=[], skip_approval=False)
             approval = await wait_for_approval(mission.id, timeout_s=approval_timeout_s)
             if approval is None or approval.approved_urls is None:
                 await missions_repo.update_status(mission.id, Status.CANCELLED)
@@ -593,6 +697,11 @@ async def run_description_mission(
             task_rows.append(row)
 
         runner = MissionRunner(user=user, mission=runner_mission, tasks=task_rows)
+        # Spec 14: register the inner runner with the wrapper so cancel
+        # endpoints route through to its `request_cancellation` /
+        # `cancel_task` checkpoints once SCRAPING begins.
+        if wrapper is not None:
+            wrapper.set_inner_runner(runner)
         await runner.run()
         # MissionRunner.run() emits the mission-level `done` and writes
         # `phase=DONE`; mark terminal_emitted so the finally block doesn't

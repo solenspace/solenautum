@@ -36,6 +36,9 @@ export interface TaskLane {
   /** Count of `selector_recovered` events seen for this task. Drives the
    * inline "selectors recovered" chip in the lane body (Spec 13). */
   selectorRecoveryCount?: number;
+  /** Snapshot key from the `task_end` event. Drives the Spec 14
+   * "Download HTML" link in the result preview. */
+  snapshotKey?: string;
 }
 
 interface _LaneTimes {
@@ -138,6 +141,7 @@ export function useTaskLanes(missionId: string | null, events: SseEvent[]): Task
           lane.status = ev.content.status;
           lane.preview = ev.content.preview;
           lane.latencyMs = ev.content.latency_ms;
+          lane.snapshotKey = ev.content.snapshot_key;
           if (stamps.finishedAt === undefined) {
             stamps.finishedAt = Date.now();
           }

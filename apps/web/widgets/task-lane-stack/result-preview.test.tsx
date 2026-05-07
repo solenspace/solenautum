@@ -9,7 +9,7 @@ describe("ResultPreview", () => {
   it("renders nothing when preview is undefined", () => {
     const { container } = render(
       <I18nTestWrapper>
-        <ResultPreview preview={undefined} />
+        <ResultPreview preview={undefined} missionId="m-1" taskId="t-1" />
       </I18nTestWrapper>,
     );
     expect(container.firstChild).toBeNull();
@@ -18,7 +18,7 @@ describe("ResultPreview", () => {
   it("renders the preview text when present", () => {
     render(
       <I18nTestWrapper>
-        <ResultPreview preview="hello world" />
+        <ResultPreview preview="hello world" missionId="m-1" taskId="t-1" />
       </I18nTestWrapper>,
     );
     expect(screen.getByText("hello world")).toBeDefined();
@@ -27,7 +27,7 @@ describe("ResultPreview", () => {
   it("renders an empty preview without crashing", () => {
     const { container } = render(
       <I18nTestWrapper>
-        <ResultPreview preview="" />
+        <ResultPreview preview="" missionId="m-1" taskId="t-1" />
       </I18nTestWrapper>,
     );
     expect(container.querySelector("pre")?.textContent).toBe("");

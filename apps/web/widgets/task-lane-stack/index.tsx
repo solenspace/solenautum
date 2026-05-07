@@ -9,6 +9,7 @@ import {
   useLaneFocus,
   useMissionStream,
   useMissionSummary,
+  useTaskCancel,
   useTaskLanes,
 } from "@/features/run-mission";
 import { useIsMobile } from "@/shared/hooks/use-mobile";
@@ -34,11 +35,24 @@ export function TaskLaneStack({ missionId }: { missionId: string }) {
   const summary = useMissionSummary(lanes, stream.isConnected, stream.reconnecting);
   const focus = useLaneFocus(lanes);
   const isMobile = useIsMobile();
+  const { cancelTask } = useTaskCancel();
 
   useShortcut("j", () => focus.next());
   useShortcut("k", () => focus.previous());
   useShortcut("Enter", () => focus.pin());
-  useShortcut("x", () => focus.unpin());
+  // Spec 14: X is now state-aware — cancel a still-running lane, fall
+  // through to unpin for terminal lanes. Decision lives in the widget so
+  // `useLaneFocus` stays focused on focus/pin state and need not know
+  // anything about the lane lifecycle.
+  useShortcut("x", () => {
+    const lane = lanes[focus.index];
+    if (!lane) return;
+    if (lane.status === "pending" || lane.status === "running") {
+      void cancelTask(missionId, lane.taskId);
+    } else {
+      focus.unpin();
+    }
+  });
 
   const announceRef = useRef<HTMLDivElement>(null);
   useMissionAnnouncements(lanes, stream.events, announceRef, t);
@@ -93,9 +107,11 @@ export function TaskLaneStack({ missionId }: { missionId: string }) {
           <TaskLaneRow
             key={lane.taskId}
             lane={lane}
+            missionId={missionId}
             isFocused={focus.index === realIndex}
             isPinned={focus.pinned.has(lane.taskId)}
             onFocus={() => focus.setIndex(realIndex)}
+            onTogglePin={() => (focus.pinned.has(lane.taskId) ? focus.unpin() : focus.pin())}
           />
         ))}
       </ul>

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
@@ -65,6 +66,41 @@ def start_mission_trace(  # type: ignore[no-any-unimported]
     )
 
 
+_COST_FETCH_TIMEOUT_S = 5.0
+
+
+async def fetch_mission_cost_cents(mission_id: UUID) -> int | None:
+    """Query Langfuse for the trace's rolled-up cost in USD cents.
+
+    Returns `None` if the trace is missing, the API is unreachable, the
+    request times out, or the SDK is disabled (no credentials). The
+    runner treats `None` as "cost unavailable" and writes `0` to
+    `missions.cost_cents` — the sidebar then renders `?` for terminal
+    missions with zero cost.
+
+    The SDK's `fetch_trace` is sync; `asyncio.to_thread` keeps the event
+    loop free during the network round-trip. The 5s `wait_for` deadline
+    bounds the worst case so a hung Langfuse cannot pin the mission's
+    `done` event for the SDK's default 60s socket timeout. No retry loop
+    here — a single 5xx must not become a runaway billing event
+    (`llm-cost-guard` invariant).
+    """
+    try:
+        trace = await asyncio.wait_for(
+            asyncio.to_thread(_client.fetch_trace, str(mission_id)),
+            timeout=_COST_FETCH_TIMEOUT_S,
+        )
+    except Exception:
+        log.exception(
+            "langfuse.fetch_trace_failed",
+            extra={"mission_id": str(mission_id)},
+        )
+        return None
+
+    cost_usd = getattr(getattr(trace, "data", None), "totalCost", None) or 0.0
+    return round(float(cost_usd) * 100)
+
+
 def emit_provider_switch(*, from_: str, to: str, reason: str) -> None:
     """Tag the active Langfuse observation with `provider_switch` metadata so
     a 429/5xx-triggered fallback (invariant 12) is visible in the trace tree.
@@ -81,4 +117,9 @@ def emit_provider_switch(*, from_: str, to: str, reason: str) -> None:
         )
 
 
-__all__ = ["emit_provider_switch", "observe", "start_mission_trace"]
+__all__ = [
+    "emit_provider_switch",
+    "fetch_mission_cost_cents",
+    "observe",
+    "start_mission_trace",
+]

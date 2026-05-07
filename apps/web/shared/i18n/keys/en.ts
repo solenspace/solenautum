@@ -89,6 +89,12 @@ export const EN = {
     selectorsRecovered_one: "1 selector recovered",
     selectorsRecovered_other: "{count} selectors recovered",
     selectorsRecoveredHint: "Saved selectors matched after the site's DOM shifted.",
+    cancelMission: "Cancel mission",
+    downloadHtml: "Download HTML",
+    downloadHtmlDevDisabled: "Download HTML — dev only, open in terminal",
+    unpin: "Unpin",
+    pin: "Pin",
+    status_awaiting_approval: "Awaiting approval",
   },
   validation: {
     urlRequired: "URL required",

@@ -1,3 +1,4 @@
+import { CancelMissionButton } from "@/features/run-mission";
 import { MissionDetailSlideover } from "@/widgets/mission-detail";
 
 import { EmptyState } from "./empty-state";
@@ -9,7 +10,8 @@ import { SlideOverContent } from "./slide-over-content";
  * sibling widget (FSD rule). Spec 11 swapped the single-task `TaskLaneCard`
  * for `TaskLaneStack`; Spec 12 wraps the body in a phase-driven state
  * machine that selects between discovery list, approval gate, and task
- * lanes.
+ * lanes; Spec 14 plugs the `Cancel mission` button into the header action
+ * slot.
  */
 export default function MissionsPage() {
   return (
@@ -17,6 +19,7 @@ export default function MissionsPage() {
       <EmptyState />
       <MissionDetailSlideover
         renderBody={(missionId) => <SlideOverContent missionId={missionId} />}
+        renderHeaderAction={(missionId) => <CancelMissionButton missionId={missionId} />}
       />
     </>
   );

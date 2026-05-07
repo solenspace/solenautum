@@ -721,13 +721,128 @@ resuming a session.
   Open Question 6 closed (race window gone). Open Question 5
   (cross-tenant selector visibility) stays open — deferred decision.
 
+- **Spec 14 — cost-and-mission-lifecycle.** Closes every user-facing
+  mission-lifecycle surface earlier specs deferred. **Cancellation**:
+  `DELETE /missions/{id}` calls `MissionRunner.request_cancellation()`;
+  `DELETE /missions/{id}/tasks/{task_id}` adds the task id to the
+  runner's `_cancelled_task_ids` set. The runner now checks
+  `_is_cancelled(task_id)` at three step boundaries inside `_run_task`
+  (entry, post-`task_start`, post-invariant-10 read) so a cancel
+  arriving in either race window still settles the row to `CANCELLED`
+  and emits exactly one `task_end` (invariants 5 + 7 hold under per-task
+  cancel). The endpoints route via `SseEmitter._active_runners`, a new
+  process-level dict populated in `adopt_runner` and cleaned up in the
+  `_shielded_run` `finally`. Idempotent: a second DELETE on a terminal
+  mission returns 204 with `x-mission-state` carrying the current
+  status. The "rare-edge" branch (no live runner — runner process died
+  while the row stayed `RUNNING`) writes the row to `CANCELLED` AND
+  emits a synthetic mission-level `done(cancelled)` (or `task_end` for
+  the per-task variant) so any client attached within the 60s eviction
+  grace observes the terminal event — invariant 5 holds even on this
+  branch. The originally-planned "DB-only" trade-off was rejected after
+  scrape-pipeline-doctor and sse-streaming-reviewer flagged the gap
+  during agent review. **Description-mode cancel routing**: the
+  `code-reviewer` agent caught a critical gap — `DescriptionMissionRunner`
+  is the wrapper registered in `_active_runners`, but it had no
+  `request_cancellation` / `cancel_task` methods, so cancels during the
+  SCRAPING phase fell through to the rare-edge synthetic-terminal path
+  while the inner `MissionRunner` continued executing (duplicate `done`
+  events, silent loss of per-task cancel intent). Fixed by giving the
+  wrapper both methods plus a `set_inner_runner` hook called from
+  `run_description_mission` once the inner runner is constructed. For
+  the AWAITING_APPROVAL case, the wrapper wakes the parked approval via
+  `submit_approval(approved_urls=[])` so the existing "no URLs survived
+  approval" branch emits exactly one terminal `done(cancelled)`. A
+  `_cancellation_requested` flag on the wrapper closes the race where a
+  cancel arrives between `submit_approval(no_pending)` and
+  `register_pending_approval`. **Post-review refactors**: factored the
+  three-line cancel block at each `_run_task` checkpoint into
+  `MissionRunner._settle_cancelled(task)` so the DB-before-SSE ordering
+  cannot drift; added `emit_task_terminal` in `runner_helpers.py`
+  consumed by both `MissionRunner._emit_task_end` and the rare-edge
+  task-cancel route (eliminates inline `SseEvent.model_validate` in
+  `routes.py`); replaced direct `_active_runners` mutations from
+  `_shielded_run` with `SseEmitter._register_runner` /
+  `_release_runner` private methods (encapsulation); ran cost fetch +
+  status compute concurrently via `asyncio.gather` (saves one
+  round-trip on every mission terminal); bound `fetch_mission_cost_cents`
+  with a 5s `asyncio.wait_for` deadline so a hung Langfuse cannot pin
+  the terminal for the SDK's default 60s socket timeout; bound
+  `reap_orphans` SQL literals from `Status` / `MissionPhase` enums so a
+  future enum rename can't silently break the reaper; removed unused
+  `cancelTask` i18n key. **Cost write-back**: a new
+  `fetch_mission_cost_cents(mission_id)` helper in `observability.py`
+  wraps `_client.fetch_trace` in `asyncio.to_thread`, catches all
+  exceptions, returns `int | None`. The runner's terminal block calls
+  it before the status / phase writes and threads the result through
+  `emit_mission_terminal(..., cost_cents=)`, so a slide-over reattach
+  observes the cost before the `done` event lands (invariant 7). A
+  Langfuse failure leaves `cost_cents = 0` and the sidebar renders
+  `?` for terminal missions with zero cost. **Snapshot**:
+  `GET /missions/{id}/tasks/{task_id}/snapshot` returns 302 with a
+  freshly-generated 1-hour signed URL (`get_blob_store().signed_url`).
+  The BFF route uses `redirect: "manual"` and relays the upstream
+  `Location` header verbatim — the Clerk JWT never reaches the R2 hop.
+  In dev (local-fs blob backend, gated on `NODE_ENV`) the web disables
+  the link with a hint because browsers refuse `file://` redirects.
+  **Reaper**: `apps/api/app/jobs/orphan_reaper.py` mirrors the Spec 13
+  selector-sweep skeleton (injectable interval / age, `CancelledError`
+  early return, bare `Exception` log-and-continue). Every 5min it runs
+  `MissionRepository.reap_orphans(cutoff)` which UPDATE-cancels
+  pending-or-`awaiting_approval` missions older than 1h (idempotent —
+  second sweep returns 0). The reaper uses a new `system_transaction()`
+  helper in `db.py` that issues `SET LOCAL row_security = off` to
+  bypass RLS for cross-user system work; the connection role must have
+  `BYPASSRLS` (Neon's `neondb_owner` and the local Postgres superuser
+  both qualify; documented in the helper docstring). **Sidebar**: new
+  `awaiting_approval` group ordered after `running` (derived from
+  `status === "running" && phase === "awaiting_approval"`); each row
+  shows cost on the right (`$X.XXX` if `cost_cents > 0`, `?` if zero
+  on terminal, empty otherwise — handles the NOT-NULL `cost_cents`
+  column without a sentinel). **Slide-over**: a new
+  `headerAction?: ReactNode` slot on `MissionDetailSlideover` carries
+  the `<CancelMissionButton missionId>` from `features/run-mission/`,
+  composed in by the page layer to keep the wrapper composition-only
+  (FSD). **Per-task cancel**: `useShortcut("x", ...)` is now state-
+  aware — cancels for `pending`/`running` lanes (via a new
+  `useTaskCancel` hook), unpins for terminal lanes; the pin/unpin
+  affordance moved to a small `Pin`/`PinOff` icon button next to the
+  chevron in `task-lane-row`. **i18n**: 6 new keys under `mission`
+  (`cancelMission`, `cancelTask`, `downloadHtml`, `downloadHtmlDevHint`,
+  `unpin`, `pin`, `status_awaiting_approval`). **Tests**: 4 new pytest
+  files (`test_cancellation_endpoints.py` — 10 cases including the
+  per-task-cancel-isolates invariant-5 guard;
+  `test_orphan_reaper.py` — 6 cases including idempotency and a
+  loop-runs-once-and-returns-on-cancel; `test_snapshot_endpoint.py` —
+  4 cases including the cross-tenant 404 and path-id mismatch;
+  `test_cost_writeback.py` — 3 cases including
+  `test_langfuse_failure_leaves_cost_zero_and_still_emits_done`).
+  3 new Vitest files (`cancel-mission-button.test.tsx`,
+  `sidebar-awaiting-approval.test.tsx`,
+  `result-preview-snapshot.test.tsx`). **Spec divergences from the
+  original text**: (1) Spec D's pseudocode wrote a new
+  `_emit_mission_terminal` method on the runner — the actual code uses
+  the existing free function `emit_mission_terminal` from
+  `runner_helpers.py` (which already accepted `cost_cents`), so the
+  cost write was wired at the existing call site instead. (2) Spec E's
+  lifespan snippet used `emitter._runners._tg = tg` — replaced with the
+  existing public `bind_lifespan_tg`. (3) Spec I's `cost_cents != null`
+  rendering check would never fire because the column is `NOT NULL
+  DEFAULT 0` — replaced with `cost_cents > 0`, with `?` rendered when
+  zero on a terminal mission. (4) The reaper needed RLS-bypass for
+  cross-user UPDATEs; the spec assumed direct-UPDATE access. Solved
+  by `system_transaction()` rather than a new alembic migration.
+  **Verification gate**: `turbo run lint` exits 0; `turbo run
+  typecheck` exits 0; `turbo run test` exits 0 (web 126 passed across
+  21 files, api 86 passed / 66 skipped — the new DB-gated tests join
+  the existing skipped set); `turbo run build` exits 0.
+
 ## In Progress
 
-- `specs/14-cost-and-mission-lifecycle.md` — Spec 13 fully landed
-  (adaptive selectors + LRU + TTL sweep + `selector_recovered` chip);
-  Spec 14 picks up the user-facing `DELETE /missions/{id}`, the
-  cost-cap reaper, and the per-mission deadline guard (Open Questions
-  1 and 12).
+- `specs/15-hardening-and-e2e.md` — Spec 14 fully landed (cancellation
+  endpoints + cost write-back + orphan reaper + snapshot redirect +
+  sidebar awaiting_approval bucket + cost cell). Spec 15 picks up the
+  hardening pass + e2e + production deploy.
 
 ## Open Questions
 

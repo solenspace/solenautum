@@ -6,7 +6,15 @@ import type { MissionRow, MissionStatus } from "@/entities/mission/types";
 
 const POLL_INTERVAL_MS = 5_000;
 
-export type MissionsByStatus = Record<MissionStatus, MissionRow[]>;
+/**
+ * Sidebar-bucket axis. Adds `awaiting_approval` to the lifecycle status
+ * (Spec 14): a description-mode mission whose `status === "running"` and
+ * `phase === "awaiting_approval"` lands in this synthetic group so the
+ * user can spot parked-on-approval missions at a glance.
+ */
+export type MissionBucket = MissionStatus | "awaiting_approval";
+
+export type MissionsByStatus = Record<MissionBucket, MissionRow[]>;
 
 interface UseMissionsState {
   missions: MissionRow[];
@@ -14,16 +22,24 @@ interface UseMissionsState {
   isLoading: boolean;
 }
 
+function _bucketOf(row: MissionRow): MissionBucket {
+  if (row.status === "running" && row.phase === "awaiting_approval") {
+    return "awaiting_approval";
+  }
+  return row.status;
+}
+
 function _group(rows: readonly MissionRow[]): MissionsByStatus {
   const out: MissionsByStatus = {
     pending: [],
     running: [],
+    awaiting_approval: [],
     succeeded: [],
     failed: [],
     cancelled: [],
   };
   for (const row of rows) {
-    out[row.status].push(row);
+    out[_bucketOf(row)].push(row);
   }
   return out;
 }
