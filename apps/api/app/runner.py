@@ -30,11 +30,12 @@ Cancellation mechanic (Spec 14 wires user-facing endpoints into this):
 from __future__ import annotations
 
 import asyncio
-import logging
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
 from uuid import UUID
+
+import structlog
 
 from app.agent import (
     DiscoveryDeps,
@@ -66,7 +67,7 @@ from app.security import CurrentUser, _current_user, assert_safe_url
 from app.sse import emitter
 from autumn_sse_protocol import SseEvent
 
-log = logging.getLogger(__name__)
+log = structlog.get_logger()
 
 _MAX_URLS_PER_MISSION = 20
 _PREVIEW_CHARS = 500
@@ -155,10 +156,8 @@ class MissionRunner:
                 # propagate.
                 log.exception(
                     "mission.task_group_raised",
-                    extra={
-                        "mission_id": str(self._mission.id),
-                        "errors": [repr(e) for e in eg.exceptions],
-                    },
+                    mission_id=str(self._mission.id),
+                    errors=[repr(e) for e in eg.exceptions],
                 )
 
         # Spec 14: status rollup and Langfuse cost lookup are independent
@@ -198,96 +197,97 @@ class MissionRunner:
           egress so a cancellation between mission-row write and the
           first fetch doesn't race past the gate.
         """
-        # Boundary 1 — pre-start: task row is still PENDING. No `task_start`
-        # has been emitted; emitting `task_end` directly is the correct
-        # single terminal (invariant 5).
-        if self._is_cancelled(task.id):
-            await self._settle_cancelled(task)
-            return
+        # Scoped binding — sibling tasks under the same TaskGroup must not
+        # see each other's ids. `contextvars` propagates across
+        # `create_task` so nested tools / LLM / SSE emissions inherit.
+        with structlog.contextvars.bound_contextvars(
+            mission_id=str(self._mission.id),
+            task_id=str(task.id),
+        ):
+            # Boundary 1 — pre-start: task row is still PENDING. No `task_start`
+            # has been emitted; emitting `task_end` directly is the correct
+            # single terminal (invariant 5).
+            if self._is_cancelled(task.id):
+                await self._settle_cancelled(task)
+                return
 
-        # Invariant 7: task row was PENDING from `start_url_mission`.
-        await self._tasks_repo.update(task.id, status=Status.RUNNING)
-        await self._emit_task_start(task)
+            # Invariant 7: task row was PENDING from `start_url_mission`.
+            await self._tasks_repo.update(task.id, status=Status.RUNNING)
+            await self._emit_task_start(task)
 
-        # Boundary 2 — between `task_start` and the invariant-10 fresh
-        # read. Cancels arriving in this window still settle terminally.
-        if self._is_cancelled(task.id):
-            await self._settle_cancelled(task)
-            return
+            # Boundary 2 — between `task_start` and the invariant-10 fresh
+            # read. Cancels arriving in this window still settle terminally.
+            if self._is_cancelled(task.id):
+                await self._settle_cancelled(task)
+                return
 
-        # Invariant 10: bail if the mission row is no longer RUNNING.
-        fresh = await self._missions_repo.get(self._mission.id)
-        if fresh is None or fresh.status != Status.RUNNING:
-            await self._settle_cancelled(task)
-            return
+            # Invariant 10: bail if the mission row is no longer RUNNING.
+            fresh = await self._missions_repo.get(self._mission.id)
+            if fresh is None or fresh.status != Status.RUNNING:
+                await self._settle_cancelled(task)
+                return
 
-        # Boundary 3 — final pre-agent check. After this we hand off to
-        # `agent.run`; in-flight cancels finish their network egress.
-        if self._is_cancelled(task.id):
-            await self._settle_cancelled(task)
-            return
+            # Boundary 3 — final pre-agent check. After this we hand off to
+            # `agent.run`; in-flight cancels finish their network egress.
+            if self._is_cancelled(task.id):
+                await self._settle_cancelled(task)
+                return
 
-        deps = MissionDeps(
-            user_id=self._user.user_id,
-            mission_id=self._mission.id,
-            task_id=task.id,
-            robots_override=self._mission.robots_override,
-        )
-        agent = build_agent()
-
-        try:
-
-            async def _run(model: Any) -> Any:
-                return await agent.run(task.url, model=model, deps=deps)
-
-            result = await self._chain.with_fallback(_run)
-        except asyncio.CancelledError:
-            # Invariant 5: emit terminal then re-raise so the TaskGroup
-            # can surface the cancellation to the parent.
-            await self._tasks_repo.update(task.id, status=Status.CANCELLED)
-            await self._emit_task_end(task, status=Status.CANCELLED)
-            raise
-        except Exception as exc:
-            log.exception(
-                "task.failed",
-                extra={
-                    "mission_id": str(self._mission.id),
-                    "task_id": str(task.id),
-                },
+            deps = MissionDeps(
+                user_id=self._user.user_id,
+                mission_id=self._mission.id,
+                task_id=task.id,
+                robots_override=self._mission.robots_override,
             )
-            await self._tasks_repo.update(task.id, status=Status.FAILED)
-            await self._emit_error(task, code="agent_failed", message=str(exc))
-            await self._emit_task_end(task, status=Status.FAILED)
-            return
+            agent = build_agent()
 
-        ok_call = last_ok_tool_call(result)
-        mission_result: MissionResult = result.output
-        succeeded = mission_result.status == "ok"
-        final_status = Status.SUCCEEDED if succeeded else Status.FAILED
+            try:
 
-        await self._tasks_repo.update(
-            task.id,
-            status=final_status,
-            latency_ms=ok_call.latency_ms if ok_call else None,
-            parsed_markdown=ok_call.markdown if ok_call else None,
-            snapshot_key=ok_call.snapshot_key if ok_call else None,
-            snapshot_truncated=ok_call.snapshot_truncated if ok_call else False,
-        )
+                async def _run(model: Any) -> Any:
+                    return await agent.run(task.url, model=model, deps=deps)
 
-        if mission_result.status == "error":
-            error_content: dict[str, Any] = {
-                "code": mission_result.error_code or "agent_failed",
-                "message": mission_result.summary,
-            }
-            if mission_result.detected_protections:
-                error_content["detected_protections"] = mission_result.detected_protections
-            await self._emit_error(
-                task,
-                code=error_content["code"],
-                message=error_content["message"],
+                result = await self._chain.with_fallback(_run)
+            except asyncio.CancelledError:
+                # Invariant 5: emit terminal then re-raise so the TaskGroup
+                # can surface the cancellation to the parent.
+                await self._tasks_repo.update(task.id, status=Status.CANCELLED)
+                await self._emit_task_end(task, status=Status.CANCELLED)
+                raise
+            except Exception as exc:
+                log.exception("task.failed")
+                await self._tasks_repo.update(task.id, status=Status.FAILED)
+                await self._emit_error(task, code="agent_failed", message=str(exc))
+                await self._emit_task_end(task, status=Status.FAILED)
+                return
+
+            ok_call = last_ok_tool_call(result)
+            mission_result: MissionResult = result.output
+            succeeded = mission_result.status == "ok"
+            final_status = Status.SUCCEEDED if succeeded else Status.FAILED
+
+            await self._tasks_repo.update(
+                task.id,
+                status=final_status,
+                latency_ms=ok_call.latency_ms if ok_call else None,
+                parsed_markdown=ok_call.markdown if ok_call else None,
+                snapshot_key=ok_call.snapshot_key if ok_call else None,
+                snapshot_truncated=ok_call.snapshot_truncated if ok_call else False,
             )
 
-        await self._emit_task_end(task, status=final_status, ok_call=ok_call)
+            if mission_result.status == "error":
+                error_content: dict[str, Any] = {
+                    "code": mission_result.error_code or "agent_failed",
+                    "message": mission_result.summary,
+                }
+                if mission_result.detected_protections:
+                    error_content["detected_protections"] = mission_result.detected_protections
+                await self._emit_error(
+                    task,
+                    code=error_content["code"],
+                    message=error_content["message"],
+                )
+
+            await self._emit_task_end(task, status=final_status, ok_call=ok_call)
 
     async def _emit_task_start(self, task: Task) -> None:
         await emitter.emit(
@@ -602,10 +602,7 @@ async def run_description_mission(
         try:
             result = await chain.with_fallback(_run)
         except Exception as exc:
-            log.exception(
-                "discovery.chain_failed",
-                extra={"mission_id": str(mission.id)},
-            )
+            log.exception("discovery.chain_failed", mission_id=str(mission.id))
             await missions_repo.update_status(mission.id, Status.FAILED)
             await _emit_error("discovery_failed", str(exc))
             await _emit_done(Status.FAILED)
@@ -718,14 +715,11 @@ async def run_description_mission(
             except Exception:  # pragma: no cover — terminal-emit must not raise
                 log.exception(
                     "description.terminal_emit_after_cancel_failed",
-                    extra={"mission_id": str(mission.id)},
+                    mission_id=str(mission.id),
                 )
         raise
     except Exception as exc:
-        log.exception(
-            "description.runner_unhandled",
-            extra={"mission_id": str(mission.id)},
-        )
+        log.exception("description.runner_unhandled", mission_id=str(mission.id))
         if not terminal_emitted:
             try:
                 await missions_repo.update_status(mission.id, Status.FAILED)
@@ -734,7 +728,7 @@ async def run_description_mission(
             except Exception:  # pragma: no cover
                 log.exception(
                     "description.terminal_emit_after_error_failed",
-                    extra={"mission_id": str(mission.id)},
+                    mission_id=str(mission.id),
                 )
     finally:
         if not terminal_emitted:
@@ -747,7 +741,7 @@ async def run_description_mission(
             except Exception:  # pragma: no cover
                 log.exception(
                     "description.terminal_emit_in_finally_failed",
-                    extra={"mission_id": str(mission.id)},
+                    mission_id=str(mission.id),
                 )
 
 

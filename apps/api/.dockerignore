@@ -1,0 +1,38 @@
+# Build context exclusions — keep the image small and avoid leaking dev-only
+# secrets or cache directories. Note: this Dockerfile builds from the monorepo
+# root (see comment in Dockerfile), so paths here are anchored at the repo root.
+
+# Workspaces / build outputs
+.venv/
+**/.venv/
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/node_modules/
+**/.next/
+**/dist/
+**/build/
+
+# Snapshot artifacts produced by the LocalFsBlobStore during dev.
+apps/api/data/
+
+# Env files belong in fly secrets, not the image.
+**/.env
+**/.env.*
+
+# Test suites do not ship to prod.
+**/tests/
+**/test/
+
+# Tool caches.
+**/.pytest_cache/
+**/.ruff_cache/
+**/.mypy_cache/
+**/.turbo/
+
+# Editor / OS detritus.
+.DS_Store
+.idea/
+.vscode/
+.git/
+.github/

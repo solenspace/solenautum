@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
+import structlog
 from langfuse import Langfuse
 from langfuse.decorators import langfuse_context, observe
 
@@ -13,7 +13,7 @@ from app.config import settings
 if TYPE_CHECKING:
     from langfuse.client import StatefulTraceClient
 
-log = logging.getLogger(__name__)
+log = structlog.get_logger()
 
 
 def _build_client() -> Langfuse:  # type: ignore[no-any-unimported]
@@ -93,7 +93,7 @@ async def fetch_mission_cost_cents(mission_id: UUID) -> int | None:
     except Exception:
         log.exception(
             "langfuse.fetch_trace_failed",
-            extra={"mission_id": str(mission_id)},
+            mission_id=str(mission_id),
         )
         return None
 
@@ -113,7 +113,8 @@ def emit_provider_switch(*, from_: str, to: str, reason: str) -> None:
     except Exception as exc:  # pragma: no cover — observability must never raise
         log.warning(
             "langfuse.update_current_observation_failed",
-            extra={"error": str(exc), "from": from_, "to": to, "reason": reason},
+            error=str(exc),
+            **{"from": from_, "to": to, "reason": reason},
         )
 
 
