@@ -120,16 +120,23 @@ class MissionRepository:
         needing an explicit advisory lock — Postgres holds the row lock
         for the duration of the transaction.
         """
+        # Casts (`::mission_status`, `::mission_phase`) are required because
+        # asyncpg sends bound parameters as `text`, and Postgres has no
+        # implicit cast from `text` to a custom enum type. Without the
+        # casts, every comparison fails with `operator does not exist:
+        # mission_status = character varying`.
         async with system_transaction() as session:
             result = await session.execute(
                 text(
                     """
                     UPDATE missions
-                    SET status = :cancelled, finished_at = now()
+                    SET status = CAST(:cancelled AS mission_status),
+                        finished_at = now()
                     WHERE (
-                        (status = :pending AND created_at < :cutoff)
-                     OR (status = :running
-                         AND phase = :awaiting_approval
+                        (status = CAST(:pending AS mission_status)
+                            AND created_at < :cutoff)
+                     OR (status = CAST(:running AS mission_status)
+                         AND phase = CAST(:awaiting_approval AS mission_phase)
                          AND created_at < :cutoff)
                     )
                     RETURNING id
