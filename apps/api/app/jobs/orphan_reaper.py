@@ -48,7 +48,7 @@ async def orphan_reaper_loop(
     while True:
         try:
             await asyncio.sleep(interval_s)
-            cutoff = datetime.now(UTC) - orphan_age
+            cutoff = datetime.now(UTC).replace(tzinfo=None) - orphan_age
             count = await repo.reap_orphans(cutoff=cutoff)
             if count > 0:
                 log.info("orphan_reaper.reaped", count=count)

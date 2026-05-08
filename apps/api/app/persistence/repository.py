@@ -93,7 +93,7 @@ class MissionRepository:
                 return
             mission.status = status
             if status in {Status.SUCCEEDED, Status.FAILED, Status.CANCELLED}:
-                mission.finished_at = datetime.now(UTC)
+                mission.finished_at = datetime.now(UTC).replace(tzinfo=None)
 
     async def update_cost_cents(self, mission_id: uuid.UUID, cost_cents: int) -> None:
         """Cache the rolled-up Langfuse cost on the mission row. Called by
@@ -251,9 +251,9 @@ class TaskRepository:
             if status is not None:
                 task.status = status
                 if status == Status.RUNNING and task.started_at is None:
-                    task.started_at = datetime.now(UTC)
+                    task.started_at = datetime.now(UTC).replace(tzinfo=None)
                 if status in {Status.SUCCEEDED, Status.FAILED, Status.CANCELLED}:
-                    task.finished_at = datetime.now(UTC)
+                    task.finished_at = datetime.now(UTC).replace(tzinfo=None)
             if latency_ms is not None:
                 task.latency_ms = latency_ms
             if parsed_markdown is not None:
@@ -333,7 +333,7 @@ class SelectorRepository:
         three-strikes counter), and bump `last_used_at`. We deliberately
         do *not* touch `hit_count` here — that's `bump_hit_count`'s job.
         """
-        now = datetime.now(UTC)
+        now = datetime.now(UTC).replace(tzinfo=None)
         stmt = (
             pg_insert(SavedSelector)
             .values(
@@ -376,7 +376,7 @@ class SelectorRepository:
             )
             .values(
                 hit_count=SavedSelector.hit_count + 1,
-                last_used_at=datetime.now(UTC),
+                last_used_at=datetime.now(UTC).replace(tzinfo=None),
             )
             .returning(SavedSelector)
         )
@@ -430,7 +430,7 @@ class SelectorRepository:
         """Delete rows where `last_used_at` is older than `days`. Returns
         the eviction count and clears matching cache entries.
         """
-        cutoff = datetime.now(UTC) - timedelta(days=days)
+        cutoff = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=days)
         async with transaction() as session:
             stmt = (
                 sa_delete(SavedSelector)
