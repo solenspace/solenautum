@@ -50,7 +50,7 @@ export function useSubmitMission(): UseSubmitMissionState {
       const response = await fetch("/api/missions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ urls }),
+        body: JSON.stringify({ mode: "url", urls }),
       });
       if (!response.ok) {
         setError("missionFailed");

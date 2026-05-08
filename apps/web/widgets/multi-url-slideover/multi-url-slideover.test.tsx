@@ -86,7 +86,7 @@ describe("MultiUrlSlideover", () => {
       expect.objectContaining({ method: "POST" }),
     );
     const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
-    expect(JSON.parse(init.body as string)).toEqual({ urls });
+    expect(JSON.parse(init.body as string)).toEqual({ mode: "url", urls });
     expect(useMissionStore.getState().openMissionId).toBe("multi-7");
   });
 
