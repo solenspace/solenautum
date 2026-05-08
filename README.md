@@ -1,6 +1,6 @@
 <div align="center">
 
-# Autumn
+<img width="100%" height="100%" alt="autum banner" src="https://github.com/user-attachments/assets/2730d281-8607-4e2c-9692-f89cbc27abfb" />
 
 **A concurrent AI scraping agent. Submit URLs or describe what you need; Autumn finds them, scrapes them in parallel, and streams results in real time.**
 
