@@ -644,8 +644,12 @@ async def run_description_mission(
             return
 
         # --- persist + emit discovery_complete -------------------------
+        # `discovery.urls` is `list | None` so the agent's strict-tool
+        # validator survives a `null` from the LLM; the field-validator
+        # coerces None → [] at runtime but mypy still sees the wider type.
+        discovered_urls = discovery.urls or []
         await missions_repo.set_discovered_urls(
-            mission.id, [u.model_dump() for u in discovery.urls]
+            mission.id, [u.model_dump() for u in discovered_urls]
         )
 
         fresh = await missions_repo.get(mission.id)
@@ -659,7 +663,7 @@ async def run_description_mission(
                 {
                     "type": "discovery_complete",
                     "content": {
-                        "count": len(discovery.urls),
+                        "count": len(discovered_urls),
                         "awaiting_approval": awaiting,
                     },
                     "mission_id": str(mission.id),
@@ -690,7 +694,7 @@ async def run_description_mission(
                 await missions_repo.set_skip_approval(mission.id, True)
             await missions_repo.set_approved_urls(mission.id, approved_urls)
         else:
-            approved_urls = [u.url for u in discovery.urls]
+            approved_urls = [u.url for u in discovered_urls]
             await missions_repo.set_approved_urls(mission.id, approved_urls)
 
         if not approved_urls:

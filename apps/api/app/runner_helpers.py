@@ -93,13 +93,17 @@ def _coerce_ok(content: Any) -> OkResult | None:
 async def compute_mission_status_from_db(mission_id: UUID, tasks_repo: TaskRepository) -> Status:
     """Roll the per-task statuses up into one mission-level status.
 
-    - SUCCEEDED iff every task succeeded.
-    - FAILED if any task failed (FAILED dominates CANCELLED so a
-      partially-cancelled-but-also-failed mission surfaces as failed —
-      the actionable signal).
-    - CANCELLED otherwise (any task cancelled, none failed). Includes
-      the empty-tasks edge case, which the validator in
-      `start_url_mission` already prevents but is handled defensively.
+    Partial-success semantics:
+    - SUCCEEDED if at least one task succeeded. Description-mode missions
+      routinely fan out to 10-20 Tavily URLs, a handful of which return
+      403/Cloudflare-blocked. Calling the whole mission FAILED in that
+      case misleads the user — most of the requested work landed and is
+      visible in the UI. The aside surfaces per-task failures with a red
+      dot + count, so the actionable signal isn't lost.
+    - CANCELLED if every non-cancelled task was cancelled (i.e. user-
+      initiated abort on a mission that produced no successes).
+    - FAILED otherwise (no successes, no cancels — every task hit a
+      hard failure).
 
     Reads from the DB so it observes the freshest status set by each
     `_run_task` coroutine; the in-memory `Task` instances captured at
@@ -107,11 +111,11 @@ async def compute_mission_status_from_db(mission_id: UUID, tasks_repo: TaskRepos
     """
     tasks = await tasks_repo.list_by_mission(mission_id)
     statuses = {t.status for t in tasks}
-    if statuses == {Status.SUCCEEDED}:
+    if Status.SUCCEEDED in statuses:
         return Status.SUCCEEDED
-    if Status.FAILED in statuses:
-        return Status.FAILED
-    return Status.CANCELLED
+    if statuses and statuses <= {Status.CANCELLED}:
+        return Status.CANCELLED
+    return Status.FAILED
 
 
 async def emit_mission_terminal(
