@@ -22,6 +22,8 @@ export async function DELETE(_request: NextRequest, ctx: TaskRouteContext) {
     method: "DELETE",
     headers: { Authorization: authorization },
   });
-  const text = upstream.status === 204 ? "" : await upstream.text();
-  return new Response(text, { status: upstream.status });
+  // Web Fetch spec: 204 responses must not carry a body (even ""), so
+  // pass `null`. The upstream returns 204 on the happy path.
+  const body = upstream.status === 204 ? null : await upstream.text();
+  return new Response(body, { status: upstream.status });
 }
