@@ -19,11 +19,15 @@ class DiscoveredUrl(BaseModel):
     """One search result returned by a SearchProvider.
 
     Schema matches the persisted shape in `missions.discovered_urls` jsonb.
+    `score` and `source` carry Tavily-side metadata when the agent runs
+    a search tool; default values cover the case where the LLM emits
+    raw URLs directly into `final_result` (validating cleanly instead
+    of throwing `ToolRetryError` and burning the agent's retry budget).
     """
 
     url: str
-    score: float = Field(..., ge=0.0, le=1.0)
-    source: str
+    score: float = Field(default=0.0, ge=0.0, le=1.0)
+    source: str = "agent"
     favicon_url: str | None = None
     title: str | None = None
 
