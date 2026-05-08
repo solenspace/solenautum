@@ -5,6 +5,23 @@ import { useEffect, useRef, useState } from "react";
 
 const _STORAGE_KEY = (missionId: string): string => `autumn:mission:${missionId}:seq`;
 
+// Mirrors the union of `type` values declared in
+// `packages/sse-protocol/generated/types.ts`. The api emits each SSE
+// frame with an `event: <type>` line, so the browser dispatches a typed
+// event — `onmessage` alone would drop everything.
+const _SSE_EVENT_TYPES = [
+  "token",
+  "tool_start",
+  "tool_end",
+  "task_start",
+  "task_end",
+  "url_discovered",
+  "discovery_complete",
+  "selector_recovered",
+  "done",
+  "error",
+] as const;
+
 export interface MissionStreamState {
   events: SseEvent[];
   isConnected: boolean;
@@ -59,11 +76,17 @@ export function useMissionStream(missionId: string | null): MissionStreamState {
       // EventSource auto-reconnects with its own backoff; do not recreate.
     };
 
-    es.onmessage = (msg) => {
+    // The api emits each event with an `event: <type>` line, so the
+    // browser dispatches a typed `task_start` / `task_end` / `done` /
+    // `error` / `tool_start` / `tool_end` / `token` / `url_discovered` /
+    // `discovery_complete` / `selector_recovered` event — never the
+    // default `message`. Listening only on `onmessage` would drop every
+    // event and leave the slide-over stuck at "Connecting…".
+    const handleEventData = (data: string): void => {
       if (cancelled) return;
       let raw: unknown;
       try {
-        raw = JSON.parse(msg.data);
+        raw = JSON.parse(data);
       } catch {
         return;
       }
@@ -73,8 +96,21 @@ export function useMissionStream(missionId: string | null): MissionStreamState {
       setState((prev) => ({ ...prev, events: [...prev.events, parsed] }));
     };
 
+    const _listener = (event: MessageEvent): void => handleEventData(event.data);
+
+    for (const eventType of _SSE_EVENT_TYPES) {
+      es.addEventListener(eventType, _listener as EventListener);
+    }
+    // Also handle the default `message` channel for any future un-typed
+    // event (and the resume-lost synthetic the api still emits with no
+    // explicit `event:` line, if any).
+    es.onmessage = _listener;
+
     return () => {
       cancelled = true;
+      for (const eventType of _SSE_EVENT_TYPES) {
+        es.removeEventListener(eventType, _listener as EventListener);
+      }
       es.close();
       sourceRef.current = null;
     };
