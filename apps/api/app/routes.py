@@ -11,7 +11,7 @@ from svix.webhooks import Webhook, WebhookVerificationError
 
 from app.config import settings
 from app.persistence.blob import get_blob_store
-from app.persistence.models import Mission, MissionMode, MissionPhase, Status
+from app.persistence.models import Mission, MissionMode, MissionPhase, Status, Task, Tier
 from app.persistence.repository import MissionRepository, TaskRepository, UserRepository
 from app.runner import (
     start_description_mission,
@@ -68,12 +68,50 @@ class ApproveMissionRequest(BaseModel):
     skip_approval: bool = False
 
 
+class _TaskResponse(BaseModel):
+    """JSON projection of a `Task` row for the mission detail endpoint.
+
+    Returned by `GET /missions/{id}` so the slide-over can hydrate task
+    lanes from persisted state when the per-mission SSE ring buffer has
+    evicted (terminal missions older than the 60s grace). The runner
+    keeps emitting live deltas through SSE; the web layer merges them
+    on top of this baseline so a 5-minute-old terminal mission renders
+    the same lane structure as a freshly-started one.
+    """
+
+    id: uuid.UUID
+    url: str
+    tier_used: Tier
+    status: Status
+    latency_ms: int | None
+    started_at: datetime | None
+    finished_at: datetime | None
+    snapshot_key: str | None
+    parsed_markdown_excerpt: str | None
+
+    @classmethod
+    def from_row(cls, row: Task) -> _TaskResponse:
+        excerpt = row.parsed_markdown[:500] if row.parsed_markdown is not None else None
+        return cls(
+            id=row.id,
+            url=row.url,
+            tier_used=row.tier_used,
+            status=row.status,
+            latency_ms=row.latency_ms,
+            started_at=row.started_at,
+            finished_at=row.finished_at,
+            snapshot_key=row.snapshot_key,
+            parsed_markdown_excerpt=excerpt,
+        )
+
+
 class _MissionResponse(BaseModel):
     """JSON projection of a `Mission` row for the BFF list / detail endpoints.
 
     Spec 12 adds `phase`, `skip_approval`, `discovered_urls`, and
     `approved_urls` so the slide-over can re-render the approval gate
-    after a refresh.
+    after a refresh. The detail endpoint also populates `tasks` so the
+    slide-over can hydrate the lane stack when SSE replay is unavailable.
     """
 
     id: uuid.UUID
@@ -87,9 +125,10 @@ class _MissionResponse(BaseModel):
     skip_approval: bool = False
     discovered_urls: list[dict[str, Any]] | None = None
     approved_urls: list[str] | None = None
+    tasks: list[_TaskResponse] | None = None
 
     @classmethod
-    def from_row(cls, row: Mission) -> _MissionResponse:
+    def from_row(cls, row: Mission, tasks: list[Task] | None = None) -> _MissionResponse:
         return cls(
             id=row.id,
             prompt=row.prompt,
@@ -102,6 +141,7 @@ class _MissionResponse(BaseModel):
             skip_approval=row.skip_approval,
             discovered_urls=row.discovered_urls,
             approved_urls=row.approved_urls,
+            tasks=[_TaskResponse.from_row(t) for t in tasks] if tasks is not None else None,
         )
 
 
@@ -386,14 +426,23 @@ async def get_mission(
     user: RequireUser,  # noqa: ARG001 — `RequireUser` binds the contextvar that scopes the repo query
     mission_id: uuid.UUID = Path(...),
 ) -> _MissionResponse:
-    """Single mission detail. RLS hides cross-tenant rows, so a not-owned id
-    returns 404 — same shape a non-existent id returns. The application layer
-    does not branch on ownership vs. existence to keep enumeration cheap.
+    """Single mission detail with persisted task list.
+
+    The slide-over hydrates from this when the per-mission SSE ring buffer
+    has evicted (terminal missions older than the 60s grace) so the user
+    still sees lane status, latency, snapshot link, and a markdown preview
+    instead of a stale "Connecting…" placeholder. Live SSE deltas are
+    merged on top of this baseline by the web layer.
+
+    RLS hides cross-tenant rows, so a not-owned id returns 404 — same
+    shape a non-existent id returns. The application layer does not
+    branch on ownership vs. existence to keep enumeration cheap.
     """
     row = await _missions.get(mission_id)
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "mission not found")
-    return _MissionResponse.from_row(row)
+    tasks = await TaskRepository().list_by_mission(mission_id)
+    return _MissionResponse.from_row(row, tasks=tasks)
 
 
 @router.get("/run-mission/{mission_id}/stream")

@@ -32,21 +32,15 @@ function _relativeTime(iso: string): string {
 }
 
 /**
- * Cost cell content (Spec 14):
- * - `cost_cents > 0` — render `$X.XXX`.
- * - `cost_cents === 0` on a terminal mission — render `?` to signal that
- *   the Langfuse fetch failed or the mission genuinely had no LLM
- *   spend. The column is `NOT NULL DEFAULT 0` on the api side so we
- *   cannot distinguish "unknown" from "free" without an extra sentinel;
- *   `?` covers both for users who care about cost.
- * - Pre-terminal — render empty (cost only lands at the `done` event).
+ * Cost cell content. We only render a value when we actually have one
+ * (`cost_cents > 0`); the previous behavior of rendering `?` for
+ * terminal-zero rows put a noisy sentinel on every free-tier mission
+ * and obscured the `$X.XXX` it was meant to highlight. Pre-terminal
+ * rows still render empty (cost only lands at the `done` event).
  */
 function _formatCost(mission: MissionRowData): string {
   if (mission.cost_cents > 0) {
     return `$${(mission.cost_cents / 100).toFixed(3)}`;
-  }
-  if (mission.status === "succeeded" || mission.status === "failed") {
-    return "?";
   }
   return "";
 }
