@@ -103,7 +103,11 @@ describe("MissionSidebar — Spec 14 awaiting_approval bucket + cost", () => {
     expect(screen.getByText("$0.120")).toBeDefined();
   });
 
-  it("renders ? when terminal mission has cost_cents == 0", () => {
+  it("renders no cost cell when terminal mission has cost_cents == 0", () => {
+    // Free-tier missions land here. The previous behavior of rendering
+    // `?` placed a noisy sentinel on every row and hid the actual
+    // `$X.XXX` it was meant to highlight; the row simply omits the
+    // cost cell when there is no spend to report.
     _mockMissions.byStatus.succeeded = [_row({ id: "m-zero", status: "succeeded", cost_cents: 0 })];
     render(
       <I18nTestWrapper>
@@ -112,7 +116,8 @@ describe("MissionSidebar — Spec 14 awaiting_approval bucket + cost", () => {
         </SidebarProvider>
       </I18nTestWrapper>,
     );
-    expect(screen.getByText("?")).toBeDefined();
+    expect(screen.queryByText("?")).toBeNull();
+    expect(screen.queryByText(/\$/)).toBeNull();
   });
 
   it("renders no cost cell while the mission is still running", () => {

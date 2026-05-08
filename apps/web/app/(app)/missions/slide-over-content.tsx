@@ -1,7 +1,10 @@
 "use client";
 
+import { useMemo } from "react";
+
 import {
   useDiscoveredUrls,
+  useMissionDetail,
   useMissionPhase,
   useMissionStore,
   useMissionStream,
@@ -34,8 +37,28 @@ export function SlideOverContent() {
   // open; the wrapping `MissionDetailSlideover` only renders this body
   // when `openMissionId` is non-null, so the empty branch never paints.
   const stream = useMissionStream(missionId ?? "");
-  const phase = useMissionPhase(stream.events);
-  const discovered = useDiscoveredUrls(stream.events);
+  const detail = useMissionDetail(missionId);
+
+  // Hydration baseline: the api's per-mission SSE ring buffer evicts
+  // 60s after a mission terminates, so reattaching to a finished
+  // mission would otherwise stay on "Connecting…" forever. The detail
+  // fetch returns the persisted task list; we synthesize SSE events
+  // from it and merge with the live stream so the lane stack reads from
+  // a single events array. Live deltas (newer `seq`) take precedence.
+  const mergedEvents = useMemo(() => {
+    if (stream.events.length === 0) return detail.syntheticEvents;
+    if (detail.syntheticEvents.length === 0) return stream.events;
+    const seen = new Set(stream.events.map((e) => `${e.task_id ?? "_"}:${e.type}`));
+    const baseline = detail.syntheticEvents.filter(
+      (e) => !seen.has(`${e.task_id ?? "_"}:${e.type}`),
+    );
+    return [...baseline, ...stream.events];
+  }, [stream.events, detail.syntheticEvents]);
+
+  const mergedStream = useMemo(() => ({ ...stream, events: mergedEvents }), [stream, mergedEvents]);
+
+  const phase = useMissionPhase(mergedEvents);
+  const discovered = useDiscoveredUrls(mergedEvents);
 
   if (!missionId) return null;
 
@@ -57,8 +80,12 @@ export function SlideOverContent() {
     );
   }
 
-  if (phase === "scraping" || phase === "done") {
-    return <TaskLaneStack missionId={missionId} stream={stream} />;
+  // Render the lane stack as soon as we have ANY task data (from SSE OR
+  // hydration), even before the phase derivation has fired. For a
+  // terminal mission the synthesized events already include the
+  // mission-level `done`, so phase derives correctly on first paint.
+  if (phase === "scraping" || phase === "done" || detail.mission?.tasks?.length) {
+    return <TaskLaneStack missionId={missionId} stream={mergedStream} />;
   }
 
   return (
