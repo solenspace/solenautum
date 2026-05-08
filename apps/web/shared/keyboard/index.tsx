@@ -2,6 +2,9 @@
 
 import { useEffect } from "react";
 
+import { useSidebar } from "@/components/ui/sidebar";
+import { useTheme } from "@/shared/theme";
+
 /**
  * Lightweight keyboard shortcut registry. One global `keydown` listener per
  * mounted hook; combos are normalized to lower-case `meta+...` strings so a
@@ -104,12 +107,28 @@ export function useShortcut(
 }
 
 /**
- * Shell-level mount point for global shortcuts that have no natural home in
- * a feature folder. Currently a no-op — `useShortcut` is invoked directly by
- * the widgets that own the action — but the component reserves a stable
- * insertion site so future global handlers (`?` for help, `Cmd+Shift+L` for
- * theme toggle) land in one place.
+ * Shell-level mount point for global shortcuts that have no natural home
+ * in a feature folder. Owns three handlers that belong to the shell, not
+ * to any single widget:
+ *
+ *   - `Cmd+Shift+L` — toggle theme.
+ *   - `Cmd+B`       — toggle sidebar (wraps the shadcn `useSidebar` hook).
+ *   - `?`           — open the command palette by dispatching the same
+ *                     `Cmd+K` event the palette already listens for, so
+ *                     the help shortcut shares one entry point with the
+ *                     palette itself.
  */
 export function KeyboardShortcuts(): null {
+  const { toggle: toggleTheme } = useTheme();
+  const { toggleSidebar } = useSidebar();
+
+  useShortcut(["cmd+shift+l", "ctrl+shift+l"], () => toggleTheme());
+  useShortcut(["cmd+b", "ctrl+b"], () => toggleSidebar());
+  useShortcut("shift+/", () => {
+    // Dispatch a synthetic Meta+K to reuse the command palette's
+    // existing handler — no second mount path, no duplicated state.
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true, bubbles: true }));
+  });
+
   return null;
 }
