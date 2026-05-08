@@ -4,9 +4,11 @@ import uuid
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
+import structlog
+from clerk_backend_api import Clerk
 from fastapi import APIRouter, Header, HTTPException, Path, Request, Response, status
 from fastapi.responses import RedirectResponse, StreamingResponse
-from pydantic import BaseModel, Field, StringConstraints
+from pydantic import BaseModel, Field, StringConstraints, field_serializer
 from svix.webhooks import Webhook, WebhookVerificationError
 
 from app.config import settings
@@ -23,7 +25,40 @@ from app.security import RequireUser, assert_safe_url, limiter
 from app.sse import emitter
 
 router = APIRouter()
+_log = structlog.get_logger()
 _users = UserRepository()
+
+
+async def _ensure_user_provisioned(user_id: str) -> None:
+    """Backfill the Clerk user → `users` table mapping if the webhook
+    hasn't fired yet. Runs at most once per user (the existence check
+    is a PK lookup); the second-and-later requests for the same user
+    short-circuit on the SELECT. Production deployments running a
+    reachable Clerk webhook will see this branch only on the first
+    POST after a sign-up that races the webhook delivery.
+    """
+    if await _users.exists(user_id):
+        return
+    email: str | None = None
+    try:
+        async with Clerk(bearer_auth=settings.clerk_secret_key) as clerk:
+            clerk_user = await clerk.users.get_async(user_id=user_id)
+            primary_id = getattr(clerk_user, "primary_email_address_id", None)
+            for entry in getattr(clerk_user, "email_addresses", []) or []:
+                if getattr(entry, "id", None) == primary_id:
+                    email = getattr(entry, "email_address", None)
+                    break
+            if email is None and getattr(clerk_user, "email_addresses", None):
+                email = getattr(clerk_user.email_addresses[0], "email_address", None)
+    except Exception as exc:  # pragma: no cover — Clerk transient errors must not block missions
+        # The JWT is already verified upstream so we know the user is real;
+        # the email is cosmetic on the row. Log the lookup miss and fall
+        # through to ensure_provisioned with a placeholder rather than
+        # 500 the user request on a transient Clerk-side blip.
+        _log.warning("clerk.user_lookup_failed", user_id=user_id, error=str(exc))
+    await _users.ensure_provisioned(user_id=user_id, email=email)
+
+
 _missions = MissionRepository()
 
 _MAX_URLS_PER_MISSION = 20
@@ -68,6 +103,23 @@ class ApproveMissionRequest(BaseModel):
     skip_approval: bool = False
 
 
+def _serialize_utc(value: datetime | None) -> str | None:
+    """Render a tz-naive UTC datetime with an explicit `Z` suffix.
+
+    Postgres `TIMESTAMP WITHOUT TIME ZONE` rows arrive as naive datetimes
+    that the codebase treats as UTC by convention (see
+    `_utc_naive_now` in `persistence/models.py`). Pydantic's default
+    `model_dump_json` emits naive datetimes without a timezone marker,
+    which the browser then parses as *local* time — putting elapsed
+    counters and "x seconds ago" relative-time math hours off depending
+    on the user's offset. Append `Z` so the wire shape is unambiguously
+    UTC and JS `Date.parse` lands on the same instant the api stored.
+    """
+    if value is None:
+        return None
+    return value.replace(tzinfo=None).isoformat() + "Z"
+
+
 class _TaskResponse(BaseModel):
     """JSON projection of a `Task` row for the mission detail endpoint.
 
@@ -88,6 +140,11 @@ class _TaskResponse(BaseModel):
     finished_at: datetime | None
     snapshot_key: str | None
     parsed_markdown_excerpt: str | None
+    summary: str | None
+
+    @field_serializer("started_at", "finished_at")
+    def _serialize_timestamps(self, value: datetime | None) -> str | None:
+        return _serialize_utc(value)
 
     @classmethod
     def from_row(cls, row: Task) -> _TaskResponse:
@@ -102,6 +159,7 @@ class _TaskResponse(BaseModel):
             finished_at=row.finished_at,
             snapshot_key=row.snapshot_key,
             parsed_markdown_excerpt=excerpt,
+            summary=row.summary,
         )
 
 
@@ -126,6 +184,10 @@ class _MissionResponse(BaseModel):
     discovered_urls: list[dict[str, Any]] | None = None
     approved_urls: list[str] | None = None
     tasks: list[_TaskResponse] | None = None
+
+    @field_serializer("created_at", "finished_at")
+    def _serialize_timestamps(self, value: datetime | None) -> str | None:
+        return _serialize_utc(value)
 
     @classmethod
     def from_row(cls, row: Mission, tasks: list[Task] | None = None) -> _MissionResponse:
@@ -229,6 +291,7 @@ async def post_mission(
     The runner is owned by the lifespan-scoped TaskGroup (invariant 3);
     the caller picks up SSE on `/run-mission/{mission_id}/stream`.
     """
+    await _ensure_user_provisioned(user.user_id)
     if isinstance(body, _CreateDescriptionMissionRequest):
         mission_id = await start_description_mission(
             user=user, query=body.query, skip_approval=body.skip_approval

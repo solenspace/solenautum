@@ -1784,3 +1784,64 @@ RLS policy migration and verify cross-tenant isolation test."
   out-of-scope list — revisit at scale. Open Question 11 stays
   open as a longer-term hygiene item (Scrapling 0.3 + lxml 6 +
   alternative markdown pipeline). Next: Spec 14.
+- 2026-05-08: Slide-over → master-detail refactor on
+  `fix/master-detail-mission-view`. User feedback was that closing
+  the slide-over wiped every piece of mission state (elapsed
+  counter, lane focus, reasoning toggle), the wasted middle pane
+  served no purpose, and the LLM-generated summary never reached
+  the UI. Six things worth recording: (1) **Route is the source of
+  truth**: `/missions/[id]` (Next 16 dynamic segment with `params:
+  Promise<{id: string}>` server-component awaited) replaces the
+  Zustand `openMissionId` store key; navigation now survives F5,
+  back/forward, and direct link sharing. The store's
+  `openMission`/`closeMission`/`openMissionId` keys are gone; the
+  remaining slide-overs (multi-URL composer, description-mode
+  composer) keep their own keys. (2) **Two-column dense layout**:
+  `<MissionView>` renders a fixed-height (h-11) hero band along the
+  top + a `lg:grid-cols-[minmax(0,1fr)_320px]` body where the left
+  column owns the live transcript (phase-aware: discovery /
+  approval / lanes) and the right column owns `<MissionAside>` —
+  three stacked cards (Overview / Summary / Tasks). Below `lg` the
+  aside stacks above the lanes for tablet / phone. (3) **Summary
+  persistence**: added `tasks.summary text` via alembic migration
+  `b6ed8ae2862b`; runner persists `mission_result.summary` on the
+  terminal task update; `_TaskResponse` exposes it; `MissionAside`
+  reads `tasks[].summary` and renders one paragraph per successful
+  task — answering the user's "what was scraped" question without
+  re-walking the message history. (4) **Elapsed counter survives
+  navigation**: derived from `mission.created_at` /
+  `mission.finished_at` (Postgres) not from SSE event timestamps.
+  `useElapsedSeconds` re-renders once a second while the mission
+  is running; for terminal missions the value is computed once and
+  frozen. The previous slide-over read elapsed from event arrival
+  times so reopening a finished mission read "00:00 elapsed". (5)
+  **Welcome state replaces the wasted middle pane**: `<WelcomeState>`
+  renders when the user has missions but none is selected —
+  keyboard-shortcut hint cards + recent-missions list (uses
+  existing `useRecentMissions`, three rows, terminal only). The
+  empty state for first-time users remains untouched. (6)
+  **`<CancelMissionButton>` accepts a `missionId` prop** instead
+  of pulling from the store, so the route-based hero can compose
+  it with the active mission's id. **Files**: 6 new (migration,
+  `mission-view/index.tsx`, `mission-view/mission-hero.tsx`,
+  `mission-view/mission-aside.tsx`,
+  `app/(app)/missions/[id]/page.tsx`,
+  `app/(app)/missions/welcome-state.tsx`); 2 deleted
+  (`widgets/mission-detail/index.tsx`,
+  `app/(app)/missions/slide-over-content.tsx`); edits to
+  `models.py` / `repository.py` / `routes.py` / `runner.py` (api),
+  `entities/mission/types.ts` / `features/run-mission/store.ts` /
+  `cancel-mission-button.{tsx,test.tsx}` /
+  `use-submit-mission.{ts,test.tsx}` /
+  `widgets/command-palette/index.tsx` /
+  `widgets/mission-sidebar/mission-row.tsx` /
+  `widgets/multi-url-slideover/multi-url-slideover.test.tsx` /
+  `app/(app)/missions/page.tsx` / `shared/i18n/keys/en.ts` /
+  `vitest.setup.mts` (default `next/navigation` mock). **i18n keys
+  added**: `missionDetailFetchFailed`, `elapsedAria`, `costFree`,
+  `aside{Overview,Mode,Status,Cost,Tasks,Failed,Cancelled,
+  Started,Finished,Summary,SummaryEmpty,TaskList}`,
+  `welcome{Title,Subtitle,NewHint,MultiHint,DescriptionHint}`.
+  **Verification gate**: `pnpm typecheck` exits 0; `pnpm vitest
+  run` 126 passed across 21 files; `pnpm build` exits 0 with
+  `/missions/[id]` registered as `ƒ` dynamic.

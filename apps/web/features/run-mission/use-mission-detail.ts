@@ -1,7 +1,7 @@
 "use client";
 
 import type { SseEvent } from "@autumn/sse-protocol";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import type { MissionRow, TaskRow } from "@/entities/mission/types";
 
@@ -16,9 +16,17 @@ interface MissionDetailState {
   syntheticEvents: SseEvent[];
   isLoading: boolean;
   error: string | null;
+  /**
+   * Re-fetches `GET /api/missions/{id}` and replaces the cached snapshot.
+   * MissionView calls this when the live SSE stream emits a mission-level
+   * `done` event so the metadata aside (Status / Cost / Tasks count /
+   * `tasks[].summary`) flips from the in-flight snapshot to the terminal
+   * snapshot without waiting for the next sidebar poll cycle.
+   */
+  refetch: () => void;
 }
 
-const _INITIAL: MissionDetailState = {
+const _INITIAL: Omit<MissionDetailState, "refetch"> = {
   mission: null,
   syntheticEvents: [],
   isLoading: false,
@@ -26,19 +34,24 @@ const _INITIAL: MissionDetailState = {
 };
 
 /**
- * Fetches `GET /api/missions/{id}` once when `missionId` becomes non-null.
- * The detail endpoint returns the mission row + persisted task list; we
- * convert the task list to SSE-event shape so the existing event-driven
- * widgets (TaskLaneStack, useTaskLanes, etc.) render terminal-mission
- * state without any extra branching at the consumer.
+ * Fetches `GET /api/missions/{id}` when `missionId` becomes non-null and
+ * whenever `refetch()` is called. The detail endpoint returns the mission
+ * row + persisted task list; we convert the task list to SSE-event shape
+ * so the existing event-driven widgets (TaskLaneStack, useTaskLanes,
+ * etc.) render terminal-mission state without any extra branching at
+ * the consumer.
  *
  * The synthesis is deliberate (not a routing change in the SSE protocol):
  * SSE remains the live channel; this hook only patches in the historical
  * baseline that the api's per-mission ring buffer has already discarded.
  */
 export function useMissionDetail(missionId: string | null): MissionDetailState {
-  const [state, setState] = useState<MissionDetailState>(_INITIAL);
+  const [state, setState] = useState<Omit<MissionDetailState, "refetch">>(_INITIAL);
+  const [tick, setTick] = useState(0);
 
+  const refetch = useCallback(() => setTick((n) => n + 1), []);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `tick` is the refetch trigger — MissionView increments it on the SSE done event so this effect rebuilds the request.
   useEffect(() => {
     if (!missionId) {
       setState(_INITIAL);
@@ -46,7 +59,9 @@ export function useMissionDetail(missionId: string | null): MissionDetailState {
     }
 
     let cancelled = false;
-    setState({ mission: null, syntheticEvents: [], isLoading: true, error: null });
+    setState((prev) =>
+      prev.mission ? { ...prev, isLoading: true } : { ..._INITIAL, isLoading: true },
+    );
 
     (async () => {
       try {
@@ -80,9 +95,9 @@ export function useMissionDetail(missionId: string | null): MissionDetailState {
     return () => {
       cancelled = true;
     };
-  }, [missionId]);
+  }, [missionId, tick]);
 
-  return state;
+  return { ...state, refetch };
 }
 
 function _synthesize(mission: MissionRow): SseEvent[] {

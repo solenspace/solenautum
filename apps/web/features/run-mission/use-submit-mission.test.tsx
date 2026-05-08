@@ -1,18 +1,20 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { useMissionStore } from "./store";
 import { useSubmitMission } from "./use-submit-mission";
 
+const _routerPush = vi.fn();
+
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: _routerPush, replace: _routerPush }),
+}));
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  _routerPush.mockClear();
+});
+
 describe("useSubmitMission", () => {
-  beforeEach(() => {
-    useMissionStore.setState({ openMissionId: null });
-  });
-
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-
   it("returns urlRequired when input is empty", async () => {
     const { result } = renderHook(() => useSubmitMission());
     await act(async () => {
@@ -38,7 +40,7 @@ describe("useSubmitMission", () => {
     expect(result.current.error).toBe("urlTooLong");
   });
 
-  it("opens the slide-over on a successful submit", async () => {
+  it("navigates to the mission detail route on a successful submit", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({ mission_id: "abc-123" }),
@@ -51,7 +53,7 @@ describe("useSubmitMission", () => {
     });
 
     await waitFor(() => {
-      expect(useMissionStore.getState().openMissionId).toBe("abc-123");
+      expect(_routerPush).toHaveBeenCalledWith("/missions/abc-123");
     });
     expect(result.current.error).toBeNull();
     expect(fetchMock).toHaveBeenCalledWith(
@@ -89,7 +91,7 @@ describe("useSubmitMission", () => {
   });
 
   describe("submitMany (multi-URL)", () => {
-    it("posts the array as `urls` and opens the slide-over", async () => {
+    it("posts the array as `urls` and navigates to the mission detail", async () => {
       const fetchMock = vi.fn().mockResolvedValue({
         ok: true,
         json: async () => ({ mission_id: "multi-1" }),
@@ -105,7 +107,7 @@ describe("useSubmitMission", () => {
       const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
       expect(JSON.parse(init.body as string)).toEqual({ mode: "url", urls });
       await waitFor(() => {
-        expect(useMissionStore.getState().openMissionId).toBe("multi-1");
+        expect(_routerPush).toHaveBeenCalledWith("/missions/multi-1");
       });
       expect(result.current.error).toBeNull();
     });

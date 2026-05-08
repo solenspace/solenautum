@@ -273,6 +273,10 @@ class MissionRunner:
                 parsed_markdown=ok_call.markdown if ok_call else None,
                 snapshot_key=ok_call.snapshot_key if ok_call else None,
                 snapshot_truncated=ok_call.snapshot_truncated if ok_call else False,
+                # Persist the agent's one-paragraph summary so the
+                # mission detail UI can anchor a "what did this scrape
+                # find" card without re-walking the message history.
+                summary=mission_result.summary,
             )
 
             # Replay the agent's intermediate state (reasoning text, tool

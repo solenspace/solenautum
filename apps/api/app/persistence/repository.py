@@ -242,6 +242,7 @@ class TaskRepository:
         snapshot_key: str | None = None,
         snapshot_truncated: bool | None = None,
         selector_cache_id: uuid.UUID | None = None,
+        summary: str | None = None,
     ) -> None:
         user_id = require_user_id()
         async with transaction() as session:
@@ -264,6 +265,8 @@ class TaskRepository:
                 task.snapshot_truncated = snapshot_truncated
             if selector_cache_id is not None:
                 task.selector_cache_id = selector_cache_id
+            if summary is not None:
+                task.summary = summary
 
 
 _FAILURE_THRESHOLD = 3
@@ -450,9 +453,13 @@ class SelectorRepository:
 
 
 class UserRepository:
-    """Webhook-only writer. The `users` table has no RLS — it is identity, not
-    user data — and `transaction()` skips `SET LOCAL` when no user is bound,
-    which is exactly the case for webhook traffic.
+    """The `users` table has no RLS — it is identity, not user data — and
+    `transaction()` skips `SET LOCAL` when no user is bound, which is the
+    case for webhook traffic. `ensure_provisioned` patches the production
+    Clerk-webhook flow for development environments where the webhook
+    endpoint isn't reachable: a freshly-signed-in Clerk user would
+    otherwise 500 on the first POST /api/missions because no `users` row
+    exists yet to satisfy the `missions.user_id` foreign key.
     """
 
     async def upsert(self, *, user_id: str, email: str) -> User:
@@ -466,6 +473,21 @@ class UserRepository:
             await session.flush()
             await session.refresh(user)
             return user
+
+    async def exists(self, user_id: str) -> bool:
+        async with transaction() as session:
+            return await session.get(User, user_id) is not None
+
+    async def ensure_provisioned(self, *, user_id: str, email: str | None) -> None:
+        """Insert a `users` row if missing. Idempotent. Used as a backfill
+        when the Clerk webhook hasn't fired yet (dev / local). The email
+        is cosmetic — it's surfaced nowhere user-facing yet — so we accept
+        a placeholder when Clerk lookup is unavailable rather than fail
+        the request the user actually asked us to perform.
+        """
+        if await self.exists(user_id):
+            return
+        await self.upsert(user_id=user_id, email=email or f"{user_id}@unknown.autumn")
 
     async def delete(self, user_id: str) -> None:
         async with transaction() as session:

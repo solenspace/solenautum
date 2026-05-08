@@ -1,9 +1,8 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { z } from "zod";
-
-import { useMissionStore } from "./store";
 
 /**
  * Validation errors are returned as i18n KEYS, not strings. The top-bar
@@ -39,7 +38,7 @@ interface UseSubmitMissionState {
 }
 
 export function useSubmitMission(): UseSubmitMissionState {
-  const open = useMissionStore((s) => s.openMission);
+  const router = useRouter();
   const [error, setError] = useState<SubmitMissionError | null>(null);
   const [isSubmitting, setSubmitting] = useState(false);
 
@@ -57,7 +56,7 @@ export function useSubmitMission(): UseSubmitMissionState {
         return;
       }
       const payload = (await response.json()) as { mission_id: string };
-      open(payload.mission_id);
+      router.push(`/missions/${payload.mission_id}`);
     } catch {
       setError("missionFailed");
     } finally {
@@ -100,7 +99,7 @@ export function useSubmitMission(): UseSubmitMissionState {
         return;
       }
       const payload = (await response.json()) as { mission_id: string };
-      open(payload.mission_id);
+      router.push(`/missions/${payload.mission_id}`);
     } catch {
       setError("missionFailed");
     } finally {

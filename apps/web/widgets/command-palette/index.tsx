@@ -2,6 +2,7 @@
 
 import { useClerk } from "@clerk/nextjs";
 import { Eye, Globe2, ListPlus, LogOut, PanelLeft, Search } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { useState } from "react";
 
 import {
@@ -32,7 +33,7 @@ export function CommandPalette() {
   const t = useT();
   const [open, setOpen] = useState(false);
   const recent = useRecentMissions();
-  const openMission = useMissionStore((s) => s.openMission);
+  const router = useRouter();
   const openMultiUrl = useMissionStore((s) => s.openMultiUrl);
   const openDescription = useMissionStore((s) => s.openDescription);
   const { signOut } = useClerk();
@@ -73,7 +74,7 @@ export function CommandPalette() {
                 <CommandItem
                   key={mission.id}
                   onSelect={() => {
-                    openMission(mission.id);
+                    router.push(`/missions/${mission.id}`);
                     setOpen(false);
                   }}
                 >

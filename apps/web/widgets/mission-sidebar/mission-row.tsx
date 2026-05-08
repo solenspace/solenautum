@@ -1,7 +1,9 @@
 "use client";
 
+import Link from "next/link";
+import { usePathname } from "next/navigation";
+
 import type { MissionRow as MissionRowData, MissionStatus } from "@/entities/mission/types";
-import { useMissionStore } from "@/features/run-mission";
 import { cn } from "@/shared/utils/cn";
 
 /** Status → dot color, mapped to project tokens (see `globals.css`). */
@@ -46,13 +48,17 @@ function _formatCost(mission: MissionRowData): string {
 }
 
 export function MissionRow({ mission }: { mission: MissionRowData }) {
-  const open = useMissionStore((s) => s.openMission);
+  const pathname = usePathname();
+  const isActive = pathname === `/missions/${mission.id}`;
   const cost = _formatCost(mission);
   return (
-    <button
-      type="button"
-      onClick={() => open(mission.id)}
-      className="group flex h-8 w-full items-center gap-2 rounded-md px-3 text-left transition-colors hover:bg-accent/40 data-[state=open]:bg-accent/40"
+    <Link
+      href={`/missions/${mission.id}`}
+      aria-current={isActive ? "page" : undefined}
+      className={cn(
+        "group flex h-8 w-full items-center gap-2 rounded-md px-3 text-left transition-colors hover:bg-accent/40",
+        isActive && "bg-accent/40",
+      )}
     >
       <span aria-hidden className={cn("h-1.5 w-1.5 rounded-full", _DOT_COLOR[mission.status])} />
       <span className="font-mono text-[11px] text-muted-foreground tabular-nums">
@@ -67,6 +73,6 @@ export function MissionRow({ mission }: { mission: MissionRowData }) {
       <span className="font-mono text-[11px] text-muted-foreground/70 tabular-nums">
         {_relativeTime(mission.created_at)}
       </span>
-    </button>
+    </Link>
   );
 }

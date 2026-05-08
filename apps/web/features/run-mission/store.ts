@@ -1,9 +1,6 @@
 import { create } from "zustand";
 
 interface MissionStore {
-  openMissionId: string | null;
-  openMission: (id: string) => void;
-  closeMission: () => void;
   multiUrlOpen: boolean;
   openMultiUrl: () => void;
   closeMultiUrl: () => void;
@@ -13,19 +10,13 @@ interface MissionStore {
 }
 
 /**
- * Holds the single-slide-over selection plus the composer slide-overs'
- * open state. Lifted out of React state so the top-bar (which fires
- * single-URL submissions), the sidebar rows (which open existing
- * missions), and the command palette (which opens the multi-URL or
- * description-mode composer) can share one truth without prop-drilling.
- *
- * Spec 11 expanded `openMissionId` to support the multi-lane selection
- * model; Spec 12 adds the description-mode composer slide-over.
+ * Holds the composer slide-overs' open state. Mission selection lives in
+ * the URL (`/missions/[id]`) since the route is the source of truth and
+ * survives navigation; the previous `openMissionId`/`openMission` keys
+ * lost every piece of mission state on close (elapsed counter, lane
+ * focus, reasoning toggle) and are gone.
  */
 export const useMissionStore = create<MissionStore>((set) => ({
-  openMissionId: null,
-  openMission: (id) => set({ openMissionId: id }),
-  closeMission: () => set({ openMissionId: null }),
   multiUrlOpen: false,
   openMultiUrl: () => set({ multiUrlOpen: true }),
   closeMultiUrl: () => set({ multiUrlOpen: false }),
