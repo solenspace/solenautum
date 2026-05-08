@@ -59,6 +59,7 @@ from app.persistence.models import (
 from app.persistence.repository import MissionRepository, TaskRepository
 from app.runner_helpers import (
     compute_mission_status_from_db,
+    emit_agent_observability,
     emit_mission_terminal,
     emit_task_terminal,
     last_ok_tool_call,
@@ -273,6 +274,24 @@ class MissionRunner:
                 snapshot_key=ok_call.snapshot_key if ok_call else None,
                 snapshot_truncated=ok_call.snapshot_truncated if ok_call else False,
             )
+
+            # Replay the agent's intermediate state (reasoning text, tool
+            # calls, tool returns) onto SSE so the slide-over's lane log
+            # shows what the agent actually did. Pydantic AI's one-shot
+            # `agent.run(...)` does not stream those events; we walk the
+            # message history after-the-fact and emit synthesized events
+            # in chronological order. The events land before the
+            # terminal `task_end` so a connected client sees the full
+            # transcript before the lane settles.
+            try:
+                await emit_agent_observability(
+                    emitter,
+                    mission_id=self._mission.id,
+                    task_id=task.id,
+                    result=result,
+                )
+            except Exception:  # pragma: no cover — observability must never break the runner
+                log.exception("task.observability_emit_failed")
 
             if mission_result.status == "error":
                 error_content: dict[str, Any] = {
