@@ -220,15 +220,34 @@ class SseEmitter:
         """Bind the FastAPI lifespan-scoped TaskGroup. Called from
         `app.main.lifespan` before the `yield`.
 
-        Idempotent re-binds are not supported — the lifespan creates one
-        group per process. A second call indicates a boot bug.
+        Production lifespans run once per process. Tests, however, spin
+        the lifespan up and down per `TestClient` context, so the second
+        bind would otherwise raise and the next `TestClient.__enter__`
+        would deadlock waiting for a startup that never completed. The
+        paired `unbind_lifespan_tg` is called from the lifespan's
+        teardown path so the guard still flags a real same-process
+        double-bind (rebind without an unbind in between).
         """
         if self._lifespan_tg is not None:
             raise RuntimeError(
                 "lifespan TaskGroup already bound; SseEmitter.bind_lifespan_tg "
-                "is intended to be called exactly once per process"
+                "is intended to be called exactly once per lifespan; an "
+                "earlier lifespan ended without calling unbind_lifespan_tg"
             )
         self._lifespan_tg = tg
+
+    def unbind_lifespan_tg(self) -> None:
+        """Release the lifespan TaskGroup reference and reset per-lifespan
+        in-memory state. Called from `app.main.lifespan` on teardown so
+        the next `bind_lifespan_tg` (e.g. the next `TestClient` context)
+        starts clean.
+        """
+        self._lifespan_tg = None
+        self._active_runners.clear()
+        # Ring buffers belong to the previous lifespan; any client still
+        # subscribed across the boundary has already missed the
+        # shutdown, so clearing here is the safe choice.
+        self._missions.clear()
 
     async def adopt_runner(self, mission_id: UUID, runner: _RunnableMission) -> None:
         """Hand a `MissionRunner` to the lifespan TaskGroup.

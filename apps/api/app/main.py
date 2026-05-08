@@ -44,16 +44,22 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         await probe_providers()
     except Exception as exc:  # pragma: no cover — probe must never crash boot
         log.warning("startup.probe_failed", error=str(exc))
-    async with asyncio.TaskGroup() as tg:
-        emitter.bind_lifespan_tg(tg)
-        # Spec 13: TTL sweep over `saved_selectors` runs every 6h. Owned
-        # by the lifespan group so shutdown cancels it via CancelledError.
-        tg.create_task(selector_sweep_loop(), name="selector-sweep")
-        # Spec 14: orphan-mission reaper runs every 5min and cancels
-        # missions stuck in pending or awaiting_approval past the 1h
-        # threshold. Same lifespan ownership as the selector sweep.
-        tg.create_task(orphan_reaper_loop(), name="orphan-reaper")
-        yield
+    try:
+        async with asyncio.TaskGroup() as tg:
+            emitter.bind_lifespan_tg(tg)
+            # Spec 13: TTL sweep over `saved_selectors` runs every 6h. Owned
+            # by the lifespan group so shutdown cancels it via CancelledError.
+            tg.create_task(selector_sweep_loop(), name="selector-sweep")
+            # Spec 14: orphan-mission reaper runs every 5min and cancels
+            # missions stuck in pending or awaiting_approval past the 1h
+            # threshold. Same lifespan ownership as the selector sweep.
+            tg.create_task(orphan_reaper_loop(), name="orphan-reaper")
+            yield
+    finally:
+        # Pair `bind_lifespan_tg`. Without this, `pytest` runs that spin
+        # the lifespan up/down across multiple `TestClient` contexts hit
+        # the rebind guard on the second startup and deadlock.
+        emitter.unbind_lifespan_tg()
 
 
 app = FastAPI(title="Autumn API", lifespan=lifespan)
