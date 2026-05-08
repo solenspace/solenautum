@@ -24,10 +24,11 @@ export async function POST(request: NextRequest, ctx: RouteContext<"/api/mission
     headers: { Authorization: authorization, "Content-Type": "application/json" },
     body,
   });
-  // 204 No Content → empty body; otherwise relay the upstream JSON detail.
-  const text = upstream.status === 204 ? "" : await upstream.text();
-  return new Response(text, {
+  // Web Fetch spec: 204 responses must not carry a body (even ""), so
+  // pass `null`. Otherwise relay the upstream JSON detail.
+  const responseBody = upstream.status === 204 ? null : await upstream.text();
+  return new Response(responseBody, {
     status: upstream.status,
-    headers: text ? { "Content-Type": "application/json" } : {},
+    headers: responseBody ? { "Content-Type": "application/json" } : {},
   });
 }

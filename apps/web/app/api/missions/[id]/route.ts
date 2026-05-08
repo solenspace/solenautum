@@ -36,6 +36,9 @@ export async function DELETE(_request: NextRequest, ctx: RouteContext<"/api/miss
   const headers: Record<string, string> = {};
   const missionState = upstream.headers.get("x-mission-state");
   if (missionState !== null) headers["x-mission-state"] = missionState;
-  const text = upstream.status === 204 ? "" : await upstream.text();
-  return new Response(text, { status: upstream.status, headers });
+  // Web Fetch spec: a Response with status 204 / 304 MUST NOT carry a
+  // body — even an empty string trips `TypeError: Response constructor:
+  // Invalid response status code 204`. Pass `null` for the body.
+  const body = upstream.status === 204 ? null : await upstream.text();
+  return new Response(body, { status: upstream.status, headers });
 }
