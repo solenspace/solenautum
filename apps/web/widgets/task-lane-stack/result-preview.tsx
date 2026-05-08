@@ -37,13 +37,19 @@ function _isDevBlobBackend(): boolean {
 export function ResultPreview({ preview, missionId, taskId, snapshotKey }: ResultPreviewProps) {
   const t = useT();
 
-  if (preview === undefined && !snapshotKey) return null;
+  // Failed tasks (no scrape ever ran, or scrape produced no parsable
+  // content) arrive here with `preview = null` or `""`. The earlier
+  // `=== undefined` check let those through and rendered an empty
+  // `<pre>` card — a sad blank rectangle below the failure chip. Treat
+  // any non-content value the same as missing.
+  const hasPreview = typeof preview === "string" && preview.trim().length > 0;
+  if (!hasPreview && !snapshotKey) return null;
 
   const isDev = _isDevBlobBackend();
 
   return (
     <div className="flex flex-col gap-2">
-      {preview !== undefined ? (
+      {hasPreview ? (
         <div className="rounded-md border border-border bg-card p-3 text-sm text-foreground">
           <pre className="whitespace-pre-wrap break-words font-sans">{preview}</pre>
         </div>

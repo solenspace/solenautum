@@ -1,6 +1,12 @@
 "use client";
 
-import { Sidebar, SidebarContent, SidebarGroup, SidebarHeader } from "@/components/ui/sidebar";
+import {
+  Sidebar,
+  SidebarContent,
+  SidebarGroup,
+  SidebarHeader,
+  SidebarTrigger,
+} from "@/components/ui/sidebar";
 import { useMissions } from "@/features/run-mission";
 import { useT } from "@/shared/i18n";
 
@@ -30,8 +36,14 @@ export function MissionSidebar() {
 
   return (
     <Sidebar className="border-r border-border/50">
-      <SidebarHeader className="px-3 py-2 text-[11px] uppercase tracking-wide text-muted-foreground/70">
-        {t("mission", "yourMissions")}
+      <SidebarHeader className="flex h-10 flex-row items-center justify-between gap-2 px-3 py-2">
+        <span className="text-[11px] uppercase tracking-wide text-muted-foreground/70">
+          {t("mission", "yourMissions")}
+        </span>
+        <SidebarTrigger
+          aria-label={t("common", "toggleSidebar")}
+          className="h-7 w-7 text-muted-foreground hover:text-foreground"
+        />
       </SidebarHeader>
       <SidebarContent>
         {_GROUPS.map((status) => {

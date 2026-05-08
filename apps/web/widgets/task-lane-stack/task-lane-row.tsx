@@ -75,6 +75,18 @@ export function TaskLaneRow({
 
   const expanded = userExpanded ?? isExpanded(lane, isFocused, isPinned, hasAutoCollapsed);
   const hasError = lane.errorCode !== undefined;
+  const hasPreview = typeof lane.preview === "string" && lane.preview.trim().length > 0;
+  const hasReasoning = lane.reasoningTokens.length > 0;
+  const hasToolChips = lane.toolCalls.length > 0 || (lane.selectorRecoveryCount ?? 0) > 0;
+  const isTerminal = lane.status !== "pending" && lane.status !== "running";
+  const showFailedFallback =
+    expanded &&
+    isTerminal &&
+    lane.status !== "succeeded" &&
+    !hasError &&
+    !hasPreview &&
+    !hasReasoning &&
+    !hasToolChips;
 
   return (
     <li
@@ -174,6 +186,11 @@ export function TaskLaneRow({
             taskId={lane.taskId}
             snapshotKey={lane.snapshotKey}
           />
+          {showFailedFallback ? (
+            <span className="text-[11px] text-muted-foreground">
+              {t("mission", `lane_terminal_${lane.status}` as const)}
+            </span>
+          ) : null}
         </div>
       ) : null}
     </li>
