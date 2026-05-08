@@ -12,10 +12,16 @@ export interface LaneFocus {
   next: () => void;
   previous: () => void;
   setIndex: (i: number) => void;
-  /** Add the currently-focused lane to the pinned set. */
+  /** Add the currently-focused lane to the pinned set (Enter shortcut). */
   pin: () => void;
-  /** Remove the currently-focused lane from the pinned set. */
+  /** Remove the currently-focused lane from the pinned set (x shortcut). */
   unpin: () => void;
+  /**
+   * Toggle the pinned state of an arbitrary lane by `taskId`. Used by the
+   * per-row pin button so clicking pin on lane 5 acts on lane 5, not on
+   * whatever lane J/K focus happens to be parked on.
+   */
+  togglePin: (taskId: string) => void;
 }
 
 /**
@@ -81,5 +87,14 @@ export function useLaneFocus(lanes: TaskLane[]): LaneFocus {
     });
   }, [focusedTaskId]);
 
-  return { index, pinned, next, previous, setIndex, pin, unpin };
+  const togglePin = useCallback((taskId: string) => {
+    setPinned((prev) => {
+      const out = new Set(prev);
+      if (out.has(taskId)) out.delete(taskId);
+      else out.add(taskId);
+      return out;
+    });
+  }, []);
+
+  return { index, pinned, next, previous, setIndex, pin, unpin, togglePin };
 }

@@ -56,8 +56,12 @@ export function MissionRow({ mission }: { mission: MissionRowData }) {
       href={`/missions/${mission.id}`}
       aria-current={isActive ? "page" : undefined}
       className={cn(
-        "group flex h-8 w-full items-center gap-2 rounded-md px-3 text-left transition-colors hover:bg-accent/40",
-        isActive && "bg-accent/40",
+        // `transition-all` is intentional — the active row also picks
+        // up a leading accent border via the `border-l-2` modifier
+        // below, and the border + bg should fade in together rather
+        // than at separate clocks.
+        "group flex h-8 w-full items-center gap-2 rounded-md border-l-2 border-transparent px-3 text-left transition-all hover:bg-accent/40",
+        isActive && "border-l-primary/70 bg-accent/40",
       )}
     >
       <span aria-hidden className={cn("h-1.5 w-1.5 rounded-full", _DOT_COLOR[mission.status])} />

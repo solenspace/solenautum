@@ -123,6 +123,11 @@ export const EN = {
     welcomeNewHint: "Paste a URL into the top bar and run.",
     welcomeMultiHint: "Open the multi-URL composer for 1–20 URLs.",
     welcomeDescriptionHint: "Describe what you need and let the agent discover URLs.",
+    lane_terminal_failed: "Failed — no diagnostic details captured for this URL.",
+    lane_terminal_cancelled: "Cancelled before completing.",
+    lane_terminal_pending: "",
+    lane_terminal_running: "",
+    lane_terminal_succeeded: "",
   },
   validation: {
     urlRequired: "URL required",

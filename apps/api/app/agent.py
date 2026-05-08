@@ -14,7 +14,7 @@ from __future__ import annotations
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from pydantic_ai import Agent, RunContext
 
 from app.search import DiscoveredUrl
@@ -61,8 +61,10 @@ Tool selection:
   MissionResult with status='error' and the matching error_code.
 
 On success: return MissionResult with status='ok', primary_url set
-to the final URL, markdown_excerpt set to the first ~500 chars of
-the markdown, and a one-paragraph summary in `summary`.
+to the final URL, and a one-paragraph summary in `summary`. Do NOT
+copy the page markdown into the response — the scrape tool's return
+value is already persisted by the runner; echoing it back blows the
+LLM's token budget on long pages and the tool call fails to close.
 
 Call exactly one tool successfully per mission. After ok, do not call
 more tools.
@@ -70,12 +72,20 @@ more tools.
 
 
 class MissionResult(BaseModel):
-    """Typed agent output. Validated by Pydantic AI on every run."""
+    """Typed agent output. Validated by Pydantic AI on every run.
+
+    `detected_protections` is intentionally `list[str] | None` even
+    though every consumer wants a list. The LLM (especially Groq's
+    Llama 3.3) frequently emits `null` for optional list fields
+    rather than `[]`, and Groq's strict tool-call validator rejects
+    `null` for `array`-typed schemas — burning the agent's retry
+    budget and 500-ing the whole mission. We accept null here and
+    normalize to `[]` for downstream consumers via the validator.
+    """
 
     status: Literal["ok", "error"]
     summary: str = Field(..., min_length=1, max_length=2000)
     primary_url: str | None = Field(default=None, max_length=2048)
-    markdown_excerpt: str | None = Field(default=None, max_length=600)
     error_code: (
         Literal[
             "site_not_supported",
@@ -86,7 +96,12 @@ class MissionResult(BaseModel):
         ]
         | None
     ) = None
-    detected_protections: list[str] = Field(default_factory=list)
+    detected_protections: list[str] | None = Field(default=None)
+
+    @field_validator("detected_protections", mode="after")
+    @classmethod
+    def _coerce_protections(cls, value: list[str] | None) -> list[str]:
+        return value if value is not None else []
 
 
 class MissionDeps(BaseModel):
@@ -206,12 +221,23 @@ class DiscoveryDeps(BaseModel):
 
 
 class DiscoveryMissionResult(BaseModel):
-    """Discovery agent's typed output. Validated by Pydantic AI on every run."""
+    """Discovery agent's typed output. Validated by Pydantic AI on every run.
+
+    `urls` is `list[DiscoveredUrl] | None` to survive Groq's strict
+    tool-call validator when the model emits `null` for the list — see
+    the comment on `MissionResult.detected_protections` for the same
+    failure mode.
+    """
 
     status: Literal["ok", "error"]
-    urls: list[DiscoveredUrl] = Field(default_factory=list)
+    urls: list[DiscoveredUrl] | None = Field(default=None)
     error_code: Literal["discovery_failed", "no_results", "rate_limited"] | None = None
     error_message: str | None = None
+
+    @field_validator("urls", mode="after")
+    @classmethod
+    def _coerce_urls(cls, value: list[DiscoveredUrl] | None) -> list[DiscoveredUrl]:
+        return value if value is not None else []
 
 
 def build_discovery_agent() -> Agent[DiscoveryDeps, DiscoveryMissionResult]:

@@ -24,12 +24,16 @@ describe("ResultPreview", () => {
     expect(screen.getByText("hello world")).toBeDefined();
   });
 
-  it("renders an empty preview without crashing", () => {
+  it("renders nothing for an empty-string preview", () => {
+    // Failed tasks land here with an empty preview; rendering the
+    // empty `<pre>` card produced a sad blank rectangle below the
+    // failure chip, so the component now skips the preview block
+    // entirely when there is no content of any kind.
     const { container } = render(
       <I18nTestWrapper>
         <ResultPreview preview="" missionId="m-1" taskId="t-1" />
       </I18nTestWrapper>,
     );
-    expect(container.querySelector("pre")?.textContent).toBe("");
+    expect(container.firstChild).toBeNull();
   });
 });

@@ -68,6 +68,20 @@ describe("useLaneFocus", () => {
     expect(result.current.pinned.has("a")).toBe(true);
   });
 
+  it("togglePin operates on the supplied taskId, not on the focused lane", () => {
+    // Per-row pin button parity: clicking pin on lane "c" while focus is
+    // parked on "a" must pin "c", not "a". The earlier shape conflated
+    // the two; pin/unpin always acted on the focused lane.
+    const lanes = [_lane("a"), _lane("b"), _lane("c")];
+    const { result } = renderHook(() => useLaneFocus(lanes));
+    expect(result.current.index).toBe(0);
+    act(() => result.current.togglePin("c"));
+    expect(result.current.pinned.has("c")).toBe(true);
+    expect(result.current.pinned.has("a")).toBe(false);
+    act(() => result.current.togglePin("c"));
+    expect(result.current.pinned.has("c")).toBe(false);
+  });
+
   it("clamps index when the lanes array shrinks below the current index", () => {
     let lanes = [_lane("a"), _lane("b"), _lane("c")];
     const { result, rerender } = renderHook(({ ls }: { ls: TaskLane[] }) => useLaneFocus(ls), {
