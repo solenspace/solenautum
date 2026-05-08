@@ -28,7 +28,7 @@ from app.persistence.repository import SelectorRepository
 from app.persistence.snapshot import persist_snapshot
 from app.security import assert_robots_allows, assert_safe_url
 from app.tools._select import select_main_content
-from app.tools._storage import ProcessLruStorage
+from app.tools._storage import HashableStorageArgs, ProcessLruStorage
 from app.tools._waf import TERMINAL_WAFS, body_excerpt, detect_waf
 
 _extractor = MarkdownExtractor()
@@ -90,7 +90,7 @@ async def scrape_dynamic(deps: DynamicDeps, args: DynamicScrapeArgs) -> DynamicS
                 custom_config={
                     "auto_match": True,
                     "storage": ProcessLruStorage,
-                    "storage_args": {"url": args.url},
+                    "storage_args": HashableStorageArgs(url=args.url),
                 },
             )
         except (PlaywrightTimeoutError, TimeoutError):
