@@ -14,9 +14,11 @@ import {
   CommandList,
   CommandShortcut,
 } from "@/components/ui/command";
+import { useSidebar } from "@/components/ui/sidebar";
 import { useMissionStore, useRecentMissions } from "@/features/run-mission";
 import { useT } from "@/shared/i18n";
 import { useShortcut } from "@/shared/keyboard";
+import { useTheme } from "@/shared/theme";
 
 /**
  * Command palette — Cmd+K opens a single-input search-or-command surface
@@ -34,6 +36,8 @@ export function CommandPalette() {
   const openMultiUrl = useMissionStore((s) => s.openMultiUrl);
   const openDescription = useMissionStore((s) => s.openDescription);
   const { signOut } = useClerk();
+  const { toggleSidebar } = useSidebar();
+  const { toggle: toggleTheme } = useTheme();
 
   useShortcut(["cmd+k", "ctrl+k"], () => setOpen((value) => !value), { allowInInput: true });
   useShortcut(["cmd+shift+n", "ctrl+shift+n"], () => openMultiUrl(), {
@@ -116,10 +120,25 @@ export function CommandPalette() {
               {t("mission", "toggleReasoning")}
               <CommandShortcut>⌘.</CommandShortcut>
             </CommandItem>
-            <CommandItem onSelect={() => setOpen(false)}>
+            <CommandItem
+              onSelect={() => {
+                setOpen(false);
+                toggleSidebar();
+              }}
+            >
               <PanelLeft className="h-3.5 w-3.5" />
               {t("common", "toggleSidebar")}
               <CommandShortcut>⌘B</CommandShortcut>
+            </CommandItem>
+            <CommandItem
+              onSelect={() => {
+                setOpen(false);
+                toggleTheme();
+              }}
+            >
+              <PanelLeft className="h-3.5 w-3.5" />
+              {t("common", "toggleTheme")}
+              <CommandShortcut>⌘⇧L</CommandShortcut>
             </CommandItem>
           </CommandGroup>
 

@@ -9,7 +9,19 @@ const _ERROR_KEYS: Record<string, Keys<"mission">> = {
   not_found: "errorNotFound",
   render_timeout: "errorRenderTimeout",
   upstream_error: "errorUpstream",
+  agent_failed: "errorAgentFailed",
+  discovery_failed: "errorDiscoveryFailed",
 };
+
+// Trim the upstream `message` so a multi-line Pydantic stack trace
+// from `pydantic_ai.exceptions.UnexpectedModelBehavior` does not
+// overrun the lane log. The chip flags the failure; detail lives in
+// the api log for the operator to inspect.
+function _truncate(message: string, max = 160): string {
+  const oneLine = message.split(/\r?\n/, 1)[0]?.trim() ?? "";
+  if (oneLine.length <= max) return oneLine;
+  return `${oneLine.slice(0, max - 1)}…`;
+}
 
 export interface InlineErrorChipProps {
   /** SSE error code emitted by the agent (Spec 09 — `site_not_supported`,
@@ -36,7 +48,7 @@ export function InlineErrorChip({ code, message, detectedProtections }: InlineEr
   // routes through `t()`; the template can be re-shaped per locale later.
   const copy = key
     ? t("mission", key, { protections: _protections(t, detectedProtections) })
-    : t("mission", "errorGeneric", { message });
+    : t("mission", "errorGeneric", { message: _truncate(message) });
 
   return (
     <div

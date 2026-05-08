@@ -42,11 +42,15 @@ describe("InlineErrorChip", () => {
   });
 
   it("falls back to the message for unrecognised codes", () => {
+    // Unrecognised codes flow through the `errorGeneric` template
+    // (`Scrape failed. {message}`) with the upstream message
+    // truncated to a single line so a multi-line stack trace cannot
+    // overrun the lane log.
     render(
       <I18nTestWrapper>
         <InlineErrorChip code="ssrf_blocked" message="blocked by SSRF guard" />
       </I18nTestWrapper>,
     );
-    expect(screen.getByText("blocked by SSRF guard")).toBeDefined();
+    expect(screen.getByText("Scrape failed. blocked by SSRF guard")).toBeDefined();
   });
 });
