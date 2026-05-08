@@ -45,17 +45,53 @@ export function SlideOverContent() {
   // fetch returns the persisted task list; we synthesize SSE events
   // from it and merge with the live stream so the lane stack reads from
   // a single events array. Live deltas (newer `seq`) take precedence.
+  //
+  // Two consequences of merging the two channels for already-terminated
+  // missions:
+  //
+  //   - The api emits a `resume_lost` error event for any reattach past
+  //     the buffer's grace window. With the synthetic baseline already
+  //     supplying the terminal `done`, that error is noise — it would
+  //     drive the announcement region to read "Mission failed: buffer
+  //     evicted" for a successful mission. Filter it out.
+  //   - The same eviction makes the EventSource flag `reconnecting`
+  //     even though there is nothing to reconnect to. When we already
+  //     have hydrated terminal state, treat the stream as steady so
+  //     the slide-over does not show the Reconnecting chip.
+  const isHydratedTerminal =
+    detail.mission?.status === "succeeded" ||
+    detail.mission?.status === "failed" ||
+    detail.mission?.status === "cancelled";
+
   const mergedEvents = useMemo(() => {
-    if (stream.events.length === 0) return detail.syntheticEvents;
-    if (detail.syntheticEvents.length === 0) return stream.events;
-    const seen = new Set(stream.events.map((e) => `${e.task_id ?? "_"}:${e.type}`));
+    const filtered = isHydratedTerminal
+      ? stream.events.filter(
+          (e) =>
+            !(
+              e.type === "error" &&
+              e.task_id === null &&
+              (e as unknown as { content?: { code?: string } }).content?.code === "resume_lost"
+            ),
+        )
+      : stream.events;
+    if (filtered.length === 0) return detail.syntheticEvents;
+    if (detail.syntheticEvents.length === 0) return filtered;
+    const seen = new Set(filtered.map((e) => `${e.task_id ?? "_"}:${e.type}`));
     const baseline = detail.syntheticEvents.filter(
       (e) => !seen.has(`${e.task_id ?? "_"}:${e.type}`),
     );
-    return [...baseline, ...stream.events];
-  }, [stream.events, detail.syntheticEvents]);
+    return [...baseline, ...filtered];
+  }, [stream.events, detail.syntheticEvents, isHydratedTerminal]);
 
-  const mergedStream = useMemo(() => ({ ...stream, events: mergedEvents }), [stream, mergedEvents]);
+  const mergedStream = useMemo(
+    () => ({
+      ...stream,
+      events: mergedEvents,
+      reconnecting: isHydratedTerminal ? false : stream.reconnecting,
+      isConnected: isHydratedTerminal ? true : stream.isConnected,
+    }),
+    [stream, mergedEvents, isHydratedTerminal],
+  );
 
   const phase = useMissionPhase(mergedEvents);
   const discovered = useDiscoveredUrls(mergedEvents);

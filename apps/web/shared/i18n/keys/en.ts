@@ -94,6 +94,8 @@ export const EN = {
     downloadHtmlDevDisabled: "Download HTML — dev only, open in terminal",
     unpin: "Unpin",
     pin: "Pin",
+    expand: "Expand",
+    collapse: "Collapse",
     status_awaiting_approval: "Awaiting approval",
   },
   validation: {
