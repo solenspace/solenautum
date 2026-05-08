@@ -250,6 +250,15 @@ function useMissionAnnouncements(
     for (const ev of events) {
       if (ev.type !== "error") continue;
       if (typeof ev.task_id === "string") continue;
+      // `resume_lost` is an SSE-protocol signal — the per-mission ring
+      // buffer evicted before this client reattached — not a mission
+      // failure. The slide-over hydrates from the persisted detail
+      // endpoint in that case, so announcing "Mission failed: buffer
+      // evicted" here would lie to the screen reader. Skip the code
+      // and trust the lane-terminal / mission-complete announcements
+      // emitted from the hydrated state.
+      const code = (ev as unknown as { content?: { code?: string } }).content?.code;
+      if (code === "resume_lost") continue;
       if (announcedMissionFailure.current === ev.seq) return;
       announcedMissionFailure.current = ev.seq;
       write(t("mission", "ariaMissionFailed", { message: ev.content.message }));

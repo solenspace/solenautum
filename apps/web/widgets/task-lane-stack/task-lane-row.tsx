@@ -31,10 +31,15 @@ interface TaskLaneRowProps {
 }
 
 /**
- * One row in the multi-lane stack. Expansion priority: focus → pin →
- * pending/running → failed/cancelled → succeeded-within-1.5s. The auto-
- * collapse window is driven by a single-shot `setTimeout` that flips
- * local state; no global timer subscription needed.
+ * One row in the multi-lane stack. Expansion priority:
+ *
+ *   user toggle (chevron) → focus → pin → pending/running → failed/
+ *   cancelled → succeeded-within-1.5s.
+ *
+ * The auto-collapse window is driven by a single-shot `setTimeout`
+ * that flips local state; no global timer subscription needed. The
+ * chevron is a real button (separate from pin) so users can hide a
+ * verbose lane without committing to the "pin keeps it open" semantic.
  */
 export function TaskLaneRow({
   lane,
@@ -47,6 +52,9 @@ export function TaskLaneRow({
   const t = useT();
   const ref = useRef<HTMLLIElement>(null);
   const [hasAutoCollapsed, setHasAutoCollapsed] = useState(false);
+  // null = follow defaults; true/false = user explicitly toggled the
+  // chevron and that overrides the heuristic until they toggle again.
+  const [userExpanded, setUserExpanded] = useState<boolean | null>(null);
 
   useEffect(() => {
     if (lane.status !== "succeeded" || lane.finishedAt === undefined) return;
@@ -65,7 +73,7 @@ export function TaskLaneRow({
     }
   }, [isFocused]);
 
-  const expanded = isExpanded(lane, isFocused, isPinned, hasAutoCollapsed);
+  const expanded = userExpanded ?? isExpanded(lane, isFocused, isPinned, hasAutoCollapsed);
   const hasError = lane.errorCode !== undefined;
 
   return (
@@ -118,13 +126,21 @@ export function TaskLaneRow({
             <Pin className="h-3.5 w-3.5" aria-hidden />
           )}
         </button>
-        <ChevronDown
-          className={cn(
-            "h-3.5 w-3.5 text-muted-foreground transition-transform",
-            !expanded && "-rotate-90",
-          )}
-          aria-hidden
-        />
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            setUserExpanded(!expanded);
+          }}
+          aria-label={expanded ? t("mission", "collapse") : t("mission", "expand")}
+          aria-expanded={expanded}
+          className="text-muted-foreground transition-colors hover:text-foreground"
+        >
+          <ChevronDown
+            className={cn("h-3.5 w-3.5 transition-transform", !expanded && "-rotate-90")}
+            aria-hidden
+          />
+        </button>
       </div>
 
       {expanded ? (
