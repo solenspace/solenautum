@@ -70,7 +70,7 @@ export function WelcomeState() {
               <li key={mission.id}>
                 <Link
                   href={`/missions/${mission.id}`}
-                  className="flex h-9 items-center gap-2 px-3 transition-colors hover:bg-accent/40"
+                  className="flex h-9 items-center gap-2 border-l-2 border-transparent px-3 transition-all hover:border-l-primary/50 hover:bg-accent/40"
                 >
                   <span
                     aria-hidden
@@ -109,7 +109,7 @@ function _ActionCard({
     <button
       type="button"
       onClick={onClick}
-      className="group flex flex-col rounded-md border border-border/50 bg-background/40 px-3 py-2 text-left transition-colors hover:border-border hover:bg-accent/30 focus-visible:border-ring focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring/40"
+      className="group flex flex-col rounded-md border border-border/50 bg-background/40 px-3 py-2 text-left transition-all hover:-translate-y-px hover:border-border hover:bg-accent/30 hover:shadow-sm active:translate-y-0 active:shadow-none focus-visible:border-ring focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring/40"
     >
       <div className="flex items-center justify-between gap-2">
         <span className="flex items-center gap-1.5 text-[12px] font-medium text-foreground">

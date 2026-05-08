@@ -77,7 +77,7 @@ export function TopBar() {
         onClick={openMultiUrl}
         aria-label={t("mission", "newMultiUrlMission")}
         title={t("mission", "newMultiUrlMission")}
-        className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent/40 hover:text-foreground"
+        className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-all hover:bg-accent/40 hover:text-foreground active:scale-95"
       >
         <ListPlus className="h-3.5 w-3.5" aria-hidden />
       </button>
@@ -86,7 +86,7 @@ export function TopBar() {
         onClick={openDescription}
         aria-label={t("mission", "newDescriptionMission")}
         title={t("mission", "newDescriptionMission")}
-        className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent/40 hover:text-foreground"
+        className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-all hover:bg-accent/40 hover:text-foreground active:scale-95"
       >
         <Search className="h-3.5 w-3.5" aria-hidden />
       </button>
@@ -94,7 +94,7 @@ export function TopBar() {
         type="button"
         onClick={toggleTheme}
         aria-label={theme === "dark" ? t("common", "switchToLight") : t("common", "switchToDark")}
-        className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent/40 hover:text-foreground"
+        className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-all hover:bg-accent/40 hover:text-foreground active:scale-95"
       >
         {theme === "dark" ? (
           <Sun className="h-3.5 w-3.5" aria-hidden />

@@ -106,7 +106,12 @@ export function TaskLaneRow({
       tabIndex={isFocused ? 0 : -1}
       data-pinned={isPinned}
       className={cn(
-        "rounded-md border border-border/50 bg-card transition-colors",
+        // `transition-all` covers border-color, background-color, ring,
+        // box-shadow and transform so focus / pin / hover state changes
+        // animate cohesively rather than each property snapping at its
+        // own rhythm. Global motion tokens supply the timing curve.
+        "rounded-md border border-border/50 bg-card transition-all",
+        "hover:border-border hover:bg-card/60",
         "data-[focused=true]:border-l-2 data-[focused=true]:border-primary data-[focused=true]:bg-accent/30",
         // Pinned lanes get a clearly distinguishable accent ring so the
         // user can spot them at a glance even when scrolled past the
@@ -139,7 +144,7 @@ export function TaskLaneRow({
           aria-pressed={isPinned}
           title={isPinned ? t("mission", "unpin") : t("mission", "pin")}
           className={cn(
-            "flex h-6 w-6 items-center justify-center rounded-md transition-colors",
+            "flex h-6 w-6 items-center justify-center rounded-md transition-all active:scale-95",
             isPinned
               ? "bg-primary/15 text-primary hover:bg-primary/25"
               : "text-muted-foreground hover:bg-accent/40 hover:text-foreground",
@@ -161,7 +166,7 @@ export function TaskLaneRow({
           }}
           aria-label={expanded ? t("mission", "collapse") : t("mission", "expand")}
           aria-expanded={expanded}
-          className="text-muted-foreground transition-colors hover:text-foreground"
+          className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground transition-all hover:bg-accent/40 hover:text-foreground active:scale-95"
         >
           <ChevronDown
             className={cn("h-3.5 w-3.5 transition-transform", !expanded && "-rotate-90")}
