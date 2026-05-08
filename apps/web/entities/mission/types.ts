@@ -49,6 +49,12 @@ export interface TaskRow {
   finished_at: string | null;
   snapshot_key: string | null;
   parsed_markdown_excerpt: string | null;
+  /**
+   * One-paragraph summary the agent produces in `MissionResult.summary`.
+   * Persisted on terminal task; null while running and for failed tasks
+   * that did not reach a successful completion.
+   */
+  summary: string | null;
 }
 
 /**

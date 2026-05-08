@@ -2,13 +2,24 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum as PyEnum, StrEnum
 from typing import Any
 
-from sqlalchemy import Column, Enum as SAEnum, ForeignKey, Index, String, text
+from sqlalchemy import Column, Enum as SAEnum, ForeignKey, Index, String, Text, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID
 from sqlmodel import Field, SQLModel
+
+
+def _utc_naive_now() -> datetime:
+    """Tz-naive UTC `now()` for `TIMESTAMP WITHOUT TIME ZONE` columns.
+    The `server_default=text("now()")` we keep on `created_at` columns
+    returns the Postgres session-tz wall-clock (typically local), which
+    drifts from the runner's `datetime.now(UTC).replace(tzinfo=None)`
+    writes by the local-tz offset and breaks elapsed-time math in the
+    UI. Setting the value client-side overrides the server default.
+    """
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 def _enum_values(enum_cls: type[PyEnum]) -> Sequence[str]:
@@ -56,6 +67,7 @@ class User(SQLModel, table=True):
     id: str = Field(primary_key=True, max_length=64)  # Clerk user_id
     email: str = Field(max_length=320, index=True)
     created_at: datetime = Field(
+        default_factory=_utc_naive_now,
         sa_column_kwargs={"server_default": text("now()")},
     )
 
@@ -115,6 +127,7 @@ class Mission(SQLModel, table=True):
         sa_column=Column(JSONB, nullable=True),
     )
     created_at: datetime = Field(
+        default_factory=_utc_naive_now,
         sa_column_kwargs={"server_default": text("now()")},
     )
     finished_at: datetime | None = None
@@ -158,6 +171,10 @@ class Task(SQLModel, table=True):
     )
     latency_ms: int | None = None
     parsed_markdown: str | None = Field(default=None)
+    # Per-task summary the agent produces in `MissionResult.summary` —
+    # one paragraph describing what was scraped. Nullable so a task
+    # that fails before the agent emits a summary stores nothing.
+    summary: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
     snapshot_key: str | None = Field(default=None, max_length=512)
     snapshot_truncated: bool = Field(default=False)
     selector_cache_id: uuid.UUID | None = Field(default=None, foreign_key="saved_selectors.id")
@@ -185,6 +202,7 @@ class SavedSelector(SQLModel, table=True):
         sa_column_kwargs={"server_default": text("0"), "nullable": False},
     )
     last_used_at: datetime = Field(
+        default_factory=_utc_naive_now,
         sa_column_kwargs={"server_default": text("now()")},
     )
 

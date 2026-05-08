@@ -4,7 +4,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nTestWrapper } from "@/shared/i18n";
 
 import { CancelMissionButton } from "./cancel-mission-button";
-import { useMissionStore } from "./store";
 
 const _mockMissions = vi.hoisted(() => ({ rows: [] as Array<Record<string, unknown>> }));
 
@@ -18,15 +17,13 @@ beforeEach(() => {
   global.fetch = _fetchMock as unknown as typeof fetch;
   _fetchMock.mockClear();
   _mockMissions.rows = [];
-  useMissionStore.setState({ openMissionId: null });
 });
 
 afterEach(() => {
   vi.restoreAllMocks();
-  useMissionStore.setState({ openMissionId: null });
 });
 
-function _openMission(id: string, status: string) {
+function _seedMission(id: string, status: string) {
   _mockMissions.rows = [
     {
       id,
@@ -38,51 +35,44 @@ function _openMission(id: string, status: string) {
       finished_at: null,
     },
   ];
-  useMissionStore.setState({ openMissionId: id });
+}
+
+function _renderFor(id: string) {
   return render(
     <I18nTestWrapper>
-      <CancelMissionButton />
+      <CancelMissionButton missionId={id} />
     </I18nTestWrapper>,
   );
 }
 
 describe("CancelMissionButton", () => {
   it("renders the button when the mission is running", () => {
-    _openMission("m-1", "running");
+    _seedMission("m-1", "running");
+    _renderFor("m-1");
     expect(screen.getByRole("button", { name: "Cancel mission" })).toBeDefined();
   });
 
   it("renders nothing when the mission is terminal", () => {
-    const { container } = _openMission("m-1", "succeeded");
+    _seedMission("m-1", "succeeded");
+    const { container } = _renderFor("m-1");
     expect(container.firstChild).toBeNull();
   });
 
   it("renders nothing when the mission is pending", () => {
-    const { container } = _openMission("m-1", "pending");
-    expect(container.firstChild).toBeNull();
-  });
-
-  it("renders nothing when no mission is open", () => {
-    const { container } = render(
-      <I18nTestWrapper>
-        <CancelMissionButton />
-      </I18nTestWrapper>,
-    );
+    _seedMission("m-1", "pending");
+    const { container } = _renderFor("m-1");
     expect(container.firstChild).toBeNull();
   });
 
   it("renders nothing when the mission id is unknown", () => {
-    useMissionStore.setState({ openMissionId: "m-other" });
-    const { container } = render(
-      <I18nTestWrapper>
-        <CancelMissionButton />
-      </I18nTestWrapper>,
-    );
+    _seedMission("m-1", "running");
+    const { container } = _renderFor("m-other");
     expect(container.firstChild).toBeNull();
   });
 
   it("issues DELETE /api/missions/{id} on click", async () => {
-    _openMission("m-1", "running");
+    _seedMission("m-1", "running");
+    _renderFor("m-1");
     fireEvent.click(screen.getByRole("button", { name: "Cancel mission" }));
     await Promise.resolve();
     expect(_fetchMock).toHaveBeenCalledWith("/api/missions/m-1", { method: "DELETE" });

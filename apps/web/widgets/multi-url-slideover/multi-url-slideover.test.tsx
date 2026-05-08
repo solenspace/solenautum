@@ -6,6 +6,24 @@ import { I18nTestWrapper } from "@/shared/i18n";
 
 import { MultiUrlSlideover } from "./index";
 
+const _routerPush = vi.fn();
+
+vi.mock("next/navigation", async () => {
+  const actual = await vi.importActual<typeof import("next/navigation")>("next/navigation");
+  return {
+    ...actual,
+    useRouter: () => ({
+      push: _routerPush,
+      replace: _routerPush,
+      refresh: vi.fn(),
+      back: vi.fn(),
+      forward: vi.fn(),
+      prefetch: vi.fn(),
+    }),
+    usePathname: () => "/missions",
+  };
+});
+
 function _open() {
   useMissionStore.setState({ multiUrlOpen: true });
 }
@@ -25,7 +43,8 @@ function _typeUrls(textarea: HTMLTextAreaElement, urls: string[]): void {
 
 describe("MultiUrlSlideover", () => {
   beforeEach(() => {
-    useMissionStore.setState({ openMissionId: null, multiUrlOpen: false });
+    useMissionStore.setState({ multiUrlOpen: false });
+    _routerPush.mockClear();
   });
 
   afterEach(() => {
@@ -87,7 +106,7 @@ describe("MultiUrlSlideover", () => {
     );
     const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
     expect(JSON.parse(init.body as string)).toEqual({ mode: "url", urls });
-    expect(useMissionStore.getState().openMissionId).toBe("multi-7");
+    expect(_routerPush).toHaveBeenCalledWith("/missions/multi-7");
   });
 
   it("renders pluralized URL count (singular vs. plural)", () => {
