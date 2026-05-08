@@ -74,6 +74,7 @@ describe("useSubmitMission", () => {
 
     const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
     expect(JSON.parse(init.body as string)).toEqual({
+      mode: "url",
       urls: ["https://example.com/"],
     });
   });
@@ -102,7 +103,7 @@ describe("useSubmitMission", () => {
       });
 
       const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
-      expect(JSON.parse(init.body as string)).toEqual({ urls });
+      expect(JSON.parse(init.body as string)).toEqual({ mode: "url", urls });
       await waitFor(() => {
         expect(useMissionStore.getState().openMissionId).toBe("multi-1");
       });
