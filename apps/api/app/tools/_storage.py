@@ -33,6 +33,27 @@ from scrapling.core.utils import _StorageTools
 from app.persistence.selector_cache import cache_get, cache_put
 
 
+class HashableStorageArgs(dict):  # type: ignore[type-arg]
+    """A `dict` subclass that is hashable, for passing through Scrapling's
+    `BaseFetcher.custom_config` without breaking its lru_cache.
+
+    Scrapling 0.2.99 wraps every `StaticEngine`/`PlayWrightEngine` etc. in
+    `@lru_cache(2, typed=True)`, with `adaptor_arguments` (a tuple of
+    `(key, value)` items derived from `custom_config`) as part of the
+    cache key. A regular `dict` value (e.g. `storage_args={"url": ...}`)
+    inside that tuple makes the tuple unhashable, so the wrapper raises
+    `TypeError: unhashable type: 'dict'` and every real fetch fails.
+
+    Subclassing `dict` and implementing `__hash__` yields a value that is
+    still `**`-unpackable into the downstream `storage(**storage_args)`
+    call inside `Adaptor.__init__`, so the per-URL namespacing for Spec 13's
+    adaptive selectors stays intact.
+    """
+
+    def __hash__(self) -> int:  # type: ignore[override]
+        return hash(tuple(sorted(self.items())))
+
+
 # `lru_cache` decorator is hard-required by `scrapling.parser:114-118` —
 # the parser asserts `hasattr(storage, "__wrapped__")` before instantiation.
 # `maxsize=64` (vs. the spec note's `1`) lets per-domain instances coexist
