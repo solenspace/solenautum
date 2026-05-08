@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronDown, Pin, PinOff } from "lucide-react";
+import { ChevronDown, Pin } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { laneStatusDotClass, type TaskLane } from "@/features/run-mission";
@@ -104,9 +104,15 @@ export function TaskLaneRow({
         }
       }}
       tabIndex={isFocused ? 0 : -1}
+      data-pinned={isPinned}
       className={cn(
         "rounded-md border border-border/50 bg-card transition-colors",
         "data-[focused=true]:border-l-2 data-[focused=true]:border-primary data-[focused=true]:bg-accent/30",
+        // Pinned lanes get a clearly distinguishable accent ring so the
+        // user can spot them at a glance even when scrolled past the
+        // active row. The ring is subtle enough to coexist with the
+        // focus border on a focused-and-pinned lane.
+        "data-[pinned=true]:ring-1 data-[pinned=true]:ring-primary/40",
       )}
     >
       <div className="flex h-8 items-center gap-2 px-2 text-[13px]">
@@ -130,13 +136,22 @@ export function TaskLaneRow({
             onTogglePin();
           }}
           aria-label={isPinned ? t("mission", "unpin") : t("mission", "pin")}
-          className="text-muted-foreground transition-colors hover:text-foreground"
-        >
-          {isPinned ? (
-            <PinOff className="h-3.5 w-3.5" aria-hidden />
-          ) : (
-            <Pin className="h-3.5 w-3.5" aria-hidden />
+          aria-pressed={isPinned}
+          title={isPinned ? t("mission", "unpin") : t("mission", "pin")}
+          className={cn(
+            "flex h-6 w-6 items-center justify-center rounded-md transition-colors",
+            isPinned
+              ? "bg-primary/15 text-primary hover:bg-primary/25"
+              : "text-muted-foreground hover:bg-accent/40 hover:text-foreground",
           )}
+        >
+          <Pin
+            className={cn(
+              "h-3.5 w-3.5 transition-transform",
+              isPinned ? "rotate-45 fill-primary" : "fill-none",
+            )}
+            aria-hidden
+          />
         </button>
         <button
           type="button"

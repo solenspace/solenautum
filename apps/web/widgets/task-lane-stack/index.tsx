@@ -123,7 +123,7 @@ export function TaskLaneStack({
             isFocused={focus.index === realIndex}
             isPinned={focus.pinned.has(lane.taskId)}
             onFocus={() => focus.setIndex(realIndex)}
-            onTogglePin={() => (focus.pinned.has(lane.taskId) ? focus.unpin() : focus.pin())}
+            onTogglePin={() => focus.togglePin(lane.taskId)}
           />
         ))}
       </ul>
