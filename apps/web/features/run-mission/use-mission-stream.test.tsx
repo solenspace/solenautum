@@ -10,18 +10,48 @@ class _FakeEventSource {
   onerror: ((ev: Event) => void) | null = null;
   onmessage: ((ev: MessageEvent) => void) | null = null;
   closed = false;
+  private _listeners: Map<string, Set<(ev: MessageEvent) => void>> = new Map();
 
   constructor(url: string) {
     this.url = url;
     _FakeEventSource.instances.push(this);
   }
 
+  addEventListener(type: string, handler: (ev: MessageEvent) => void): void {
+    if (!this._listeners.has(type)) this._listeners.set(type, new Set());
+    this._listeners.get(type)?.add(handler);
+  }
+
+  removeEventListener(type: string, handler: (ev: MessageEvent) => void): void {
+    this._listeners.get(type)?.delete(handler);
+  }
+
   close(): void {
     this.closed = true;
   }
 
-  emit(payload: unknown): void {
-    this.onmessage?.(new MessageEvent("message", { data: JSON.stringify(payload) }));
+  // The api emits each frame with an `event: <type>` line, so a real
+  // EventSource fires the typed listener (not `onmessage`). The mock
+  // mirrors that: dispatch to the registered typed listeners using the
+  // payload's `type`. Pass `useMessageChannel=true` to exercise the
+  // un-typed `message` fallback.
+  emit(payload: unknown, useMessageChannel = false): void {
+    const data = JSON.stringify(payload);
+    const ev = new MessageEvent("message", { data });
+    if (useMessageChannel) {
+      this.onmessage?.(ev);
+      return;
+    }
+    const type =
+      typeof payload === "object" && payload !== null && "type" in payload
+        ? String((payload as { type?: unknown }).type)
+        : "message";
+    const listeners = this._listeners.get(type);
+    if (listeners && listeners.size > 0) {
+      for (const h of listeners) h(ev);
+    } else {
+      this.onmessage?.(ev);
+    }
   }
 
   emitOpen(): void {

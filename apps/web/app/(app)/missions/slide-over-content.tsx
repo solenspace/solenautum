@@ -58,7 +58,7 @@ export function SlideOverContent() {
   }
 
   if (phase === "scraping" || phase === "done") {
-    return <TaskLaneStack missionId={missionId} />;
+    return <TaskLaneStack missionId={missionId} stream={stream} />;
   }
 
   return (

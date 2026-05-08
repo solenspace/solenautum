@@ -11,25 +11,12 @@ vi.mock("@/shared/hooks/use-mobile", () => ({
   useIsMobile: () => _isMobileMock,
 }));
 
-// The orchestrator pulls SSE events from `useMissionStream`. Mocking the
-// hook lets the test inject a deterministic events array without touching
-// EventSource. `useMissionStream` lives in the run-mission feature barrel,
-// so we re-export the rest of the barrel and override only the stream.
+// The widget now receives the SSE stream as a prop (single SSE consumer
+// per mission lives in the slide-over container). Tests inject a
+// deterministic stream-state object directly via `_renderStack`.
 let _streamEvents: SseEvent[] = [];
 let _streamConnected = true;
 let _streamReconnecting = false;
-vi.mock("@/features/run-mission", async () => {
-  const actual =
-    await vi.importActual<typeof import("@/features/run-mission")>("@/features/run-mission");
-  return {
-    ...actual,
-    useMissionStream: () => ({
-      events: _streamEvents,
-      isConnected: _streamConnected,
-      reconnecting: _streamReconnecting,
-    }),
-  };
-});
 
 import { TaskLaneStack } from "./index";
 
@@ -51,7 +38,14 @@ function _setStream(
 function _renderStack() {
   return render(
     <I18nTestWrapper>
-      <TaskLaneStack missionId={_MID} />
+      <TaskLaneStack
+        missionId={_MID}
+        stream={{
+          events: _streamEvents,
+          isConnected: _streamConnected,
+          reconnecting: _streamReconnecting,
+        }}
+      />
     </I18nTestWrapper>,
   );
 }

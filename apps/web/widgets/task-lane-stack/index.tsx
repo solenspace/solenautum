@@ -5,9 +5,9 @@ import { useSwipeable } from "react-swipeable";
 
 import {
   laneStatusDotClass,
+  type MissionStreamState,
   type TaskLane,
   useLaneFocus,
-  useMissionStream,
   useMissionSummary,
   useTaskCancel,
   useTaskLanes,
@@ -28,9 +28,21 @@ import { TaskLaneRow } from "./task-lane-row";
  * `aria-live="off"` so screen readers only read a lane on intentional
  * navigation; per-token announcements would be unusable at any N.
  */
-export function TaskLaneStack({ missionId }: { missionId: string }) {
+// `stream` is supplied by the parent (the slide-over) so this widget
+// reads from the SAME `useMissionStream` subscription that drives the
+// phase-aware container. The flagship rule is "single SSE consumer per
+// mission" (`code-standards.md` and `architecture.md`); calling
+// `useMissionStream` here too would open a second EventSource with
+// independent React state and the lanes would never see the events
+// already drained into the parent's state.
+export function TaskLaneStack({
+  missionId,
+  stream,
+}: {
+  missionId: string;
+  stream: MissionStreamState;
+}) {
   const t = useT();
-  const stream = useMissionStream(missionId);
   const lanes = useTaskLanes(missionId, stream.events);
   const summary = useMissionSummary(lanes, stream.isConnected, stream.reconnecting);
   const focus = useLaneFocus(lanes);
@@ -183,7 +195,7 @@ function MobileLaneStrip({
  */
 function useMissionAnnouncements(
   lanes: TaskLane[],
-  events: ReturnType<typeof useMissionStream>["events"],
+  events: MissionStreamState["events"],
   announceRef: React.RefObject<HTMLDivElement | null>,
   t: ReturnType<typeof useT>,
 ): void {
