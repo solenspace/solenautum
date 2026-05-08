@@ -55,5 +55,33 @@ async def transaction() -> AsyncIterator[AsyncSession]:
     factory = _get_session_factory()
     async with factory() as session, session.begin():
         if user is not None:
-            await session.execute(text("SET LOCAL app.user_id = :uid").bindparams(uid=user.user_id))
+            # `SET LOCAL <name> = $1` is rejected by Postgres' parser
+            # (asyncpg `prepare` raises `syntax error at or near "$1"`).
+            # `set_config(name, value, is_local=true)` accepts a bound
+            # parameter and is the canonical equivalent.
+            await session.execute(
+                text("SELECT set_config('app.user_id', :uid, true)").bindparams(uid=user.user_id),
+            )
+        yield session
+
+
+@asynccontextmanager
+async def system_transaction() -> AsyncIterator[AsyncSession]:
+    """Open a transaction that bypasses RLS for cross-user system tasks
+    (the orphan reaper). Issues `SET LOCAL row_security = off` so the
+    UPDATE can scan every user's `missions` row.
+
+    Connection-role requirement: the role must have either superuser or
+    `BYPASSRLS`. Neon's `neondb_owner` satisfies this; local dev with the
+    default Postgres superuser also satisfies it. If a deployment uses a
+    role without bypass capability, the reaper will surface a permission
+    error in logs on first sweep — escalate by granting `BYPASSRLS` on
+    that role rather than weakening the application's RLS posture.
+
+    Never use for user-initiated routes; those always go through
+    `transaction()` so RLS is the backstop on a misrouted query.
+    """
+    factory = _get_session_factory()
+    async with factory() as session, session.begin():
+        await session.execute(text("SET LOCAL row_security = off"))
         yield session

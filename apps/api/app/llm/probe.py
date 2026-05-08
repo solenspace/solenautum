@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import logging
+import structlog
 
 from app.config import settings
 
-log = logging.getLogger(__name__)
+log = structlog.get_logger()
 
 
 async def probe_providers() -> None:
@@ -19,15 +19,9 @@ async def probe_providers() -> None:
         ("groq", settings.groq_api_key),
     ):
         status = "configured" if key else "missing"
-        log.info(
-            "llm.provider.probe",
-            extra={"provider": name, "status": status},
-        )
+        log.info("llm.provider.probe", provider=name, status=status)
 
     if settings.langfuse_public_key and settings.langfuse_secret_key:
-        log.info(
-            "langfuse.probe",
-            extra={"status": "configured", "host": settings.langfuse_host},
-        )
+        log.info("langfuse.probe", status="configured", host=settings.langfuse_host)
     else:
-        log.info("langfuse.probe", extra={"status": "missing"})
+        log.info("langfuse.probe", status="missing")

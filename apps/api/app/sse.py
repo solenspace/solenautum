@@ -2,18 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import time
 from collections import deque
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol
 from uuid import UUID
+
+import structlog
 
 from autumn_sse_protocol import SseEvent
 
-log = logging.getLogger(__name__)
+log = structlog.get_logger()
 
 _HEARTBEAT_INTERVAL_S = 15
 _BUFFER_CAPACITY = 200
@@ -38,15 +39,39 @@ class _MissionState:
     terminated_at: float | None = None
 
 
+class _RunnableMission(Protocol):
+    """Structural type for `MissionRunner` consumed by `adopt_runner`.
+
+    Avoids the runner→sse→runner import cycle: the emitter only needs an
+    awaitable `run()`. The Spec 14 cancel endpoints reach in via
+    `SseEmitter.get_active_runner(mission_id)` and call
+    `request_cancellation()` / `cancel_task(task_id)` on the live runner.
+    """
+
+    def run(self) -> Awaitable[None]: ...
+
+
 class SseEmitter:
     """Process-wide SSE emitter. Implements the Spec 06 contract: single
     per-mission queue, monotonic `seq`, 200-event ring buffer, `Last-Event-ID`
     resume, terminal-event eviction with 60s grace.
+
+    Also owns runner adoption (Spec 10): the FastAPI `lifespan` binds an
+    `asyncio.TaskGroup` here, and `adopt_runner` hands each new
+    `MissionRunner` to that group so the runner runs to completion in a
+    structured-concurrency-safe parent (invariant 3) while the
+    `POST /missions` handler returns the `mission_id` immediately.
     """
 
     def __init__(self) -> None:
         self._missions: dict[UUID, _MissionState] = {}
         self._lock = asyncio.Lock()
+        self._lifespan_tg: asyncio.TaskGroup | None = None
+        # Spec 14: process-level registry of running mission runners so the
+        # cancel endpoints can route a request to the live `MissionRunner`
+        # without going through the DB. Populated by `adopt_runner`,
+        # cleaned up by `_shielded_run`'s `finally`.
+        self._active_runners: dict[UUID, _RunnableMission] = {}
 
     async def emit(self, event: SseEvent) -> None:  # type: ignore[no-any-unimported]
         """Validate the event, assign a monotonic `seq`, append to the ring
@@ -69,11 +94,9 @@ class SseEmitter:
             except asyncio.QueueFull:
                 log.warning(
                     "sse.queue_full",
-                    extra={
-                        "mission_id": str(mission_id),
-                        "seq": seq,
-                        "type": payload.get("type"),
-                    },
+                    mission_id=str(mission_id),
+                    seq=seq,
+                    type=payload.get("type"),
                 )
 
     @asynccontextmanager
@@ -192,6 +215,106 @@ class SseEmitter:
                 return
             if time.monotonic() - state.terminated_at > _TERMINATE_GRACE_S:
                 self._missions.pop(mission_id, None)
+
+    def bind_lifespan_tg(self, tg: asyncio.TaskGroup) -> None:
+        """Bind the FastAPI lifespan-scoped TaskGroup. Called from
+        `app.main.lifespan` before the `yield`.
+
+        Production lifespans run once per process. Tests, however, spin
+        the lifespan up and down per `TestClient` context, so the second
+        bind would otherwise raise and the next `TestClient.__enter__`
+        would deadlock waiting for a startup that never completed. The
+        paired `unbind_lifespan_tg` is called from the lifespan's
+        teardown path so the guard still flags a real same-process
+        double-bind (rebind without an unbind in between).
+        """
+        if self._lifespan_tg is not None:
+            raise RuntimeError(
+                "lifespan TaskGroup already bound; SseEmitter.bind_lifespan_tg "
+                "is intended to be called exactly once per lifespan; an "
+                "earlier lifespan ended without calling unbind_lifespan_tg"
+            )
+        self._lifespan_tg = tg
+
+    def unbind_lifespan_tg(self) -> None:
+        """Release the lifespan TaskGroup reference and reset per-lifespan
+        in-memory state. Called from `app.main.lifespan` on teardown so
+        the next `bind_lifespan_tg` (e.g. the next `TestClient` context)
+        starts clean.
+        """
+        self._lifespan_tg = None
+        self._active_runners.clear()
+        # Ring buffers belong to the previous lifespan; any client still
+        # subscribed across the boundary has already missed the
+        # shutdown, so clearing here is the safe choice.
+        self._missions.clear()
+
+    async def adopt_runner(self, mission_id: UUID, runner: _RunnableMission) -> None:
+        """Hand a `MissionRunner` to the lifespan TaskGroup.
+
+        Wraps `runner.run()` in a logging shield so an unhandled mission
+        error does not propagate up the lifespan group (which would
+        cancel every other in-flight mission). The runner itself is
+        responsible for emitting per-task and mission-level terminal
+        events; if it fails partway through, that's the bug we want to
+        surface in logs and Langfuse, not an SSE blackout.
+
+        The runner is registered in `_active_runners` *before* the task
+        is scheduled so a `DELETE /missions/{id}` that arrives between
+        adoption and the runner's first `await` still finds the live
+        runner via `get_active_runner`.
+        """
+        if self._lifespan_tg is None:
+            raise RuntimeError(
+                "lifespan TaskGroup not bound; call bind_lifespan_tg from "
+                "the FastAPI lifespan before serving traffic"
+            )
+        self._register_runner(mission_id, runner)
+        self._lifespan_tg.create_task(
+            _shielded_run(mission_id, runner),
+            name=f"mission:{mission_id}",
+        )
+
+    def get_active_runner(self, mission_id: UUID) -> _RunnableMission | None:
+        """Return the live `_RunnableMission` for `mission_id` if the
+        runner is still in this process, else `None`. The Spec 14 cancel
+        endpoints use this to route `request_cancellation()` /
+        `cancel_task(task_id)` to the running coroutine.
+        """
+        return self._active_runners.get(mission_id)
+
+    def _register_runner(self, mission_id: UUID, runner: _RunnableMission) -> None:
+        """Add the runner to the active registry. Internal — only
+        `adopt_runner` calls this. A description-mode wrapper may
+        re-register itself here when its inner `MissionRunner` is
+        constructed mid-flight (so per-task cancels route through to
+        the inner coroutine).
+        """
+        self._active_runners[mission_id] = runner
+
+    def _release_runner(self, mission_id: UUID) -> None:
+        """Remove the runner from the active registry. Internal —
+        `_shielded_run`'s `finally` calls this once the runner returns,
+        whether normally or via an unhandled exception.
+        """
+        self._active_runners.pop(mission_id, None)
+
+
+async def _shielded_run(mission_id: UUID, runner: _RunnableMission) -> None:
+    """Run a MissionRunner; log unhandled errors instead of letting them
+    abort the lifespan TaskGroup. The `finally` clause releases the
+    runner from the registry so subsequent cancel requests fall through
+    to the rare-edge synthetic-terminal branch.
+    """
+    try:
+        await runner.run()
+    except Exception:
+        log.exception(
+            "mission.runner_unhandled_error",
+            mission_id=str(mission_id),
+        )
+    finally:
+        emitter._release_runner(mission_id)
 
 
 emitter = SseEmitter()

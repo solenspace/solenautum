@@ -1,23 +1,29 @@
 """HTTP tier — Scrapling `AsyncFetcher` + Crawl4AI markdown extraction.
 
 Returns `HttpScrapeOk | HttpScrapeFailure`. Reasons drive the agent's
-escalation contract; see `agent.py`'s system prompt. `http_slot()` is
-not acquired here — Spec 10 wires it.
+escalation contract; see `agent.py`'s system prompt. The fetch acquires
+a layered HTTP slot (per-mission then global) so a 20-URL mission does
+not saturate the process-wide budget.
 """
 
 from __future__ import annotations
 
 from time import perf_counter
 from typing import Literal
+from urllib.parse import urlparse
 from uuid import UUID
 
 from pydantic import BaseModel, Field
 from scrapling.fetchers import AsyncFetcher
 
+from app.concurrency import current_mission_semaphores
 from app.extract import MarkdownExtractor
 from app.observability import observe
+from app.persistence.repository import SelectorRepository
 from app.persistence.snapshot import persist_snapshot
 from app.security import assert_robots_allows, assert_safe_url
+from app.tools._select import select_main_content
+from app.tools._storage import HashableStorageArgs, ProcessLruStorage
 from app.tools._waf import TERMINAL_WAFS, body_excerpt, detect_waf
 
 _extractor = MarkdownExtractor()
@@ -78,12 +84,22 @@ async def scrape_http(deps: HttpToolDeps, args: HttpScrapeArgs) -> HttpScrapeRes
     )
 
     start = perf_counter()
-    page = await AsyncFetcher.get(
-        args.url,
-        stealthy_headers=True,
-        follow_redirects=True,
-        timeout=15,
-    )
+    async with current_mission_semaphores().http_slot():
+        page = await AsyncFetcher.get(
+            args.url,
+            stealthy_headers=True,
+            follow_redirects=True,
+            timeout=15,
+            # Spec 13: enable adaptive selector recovery. Storage class
+            # threaded through `BaseFetcher._generate_parser_arguments`
+            # so the Adaptor returned by Scrapling has a live
+            # `ProcessLruStorage` instance ready for `select_main_content`.
+            custom_config={
+                "auto_match": True,
+                "storage": ProcessLruStorage,
+                "storage_args": HashableStorageArgs(url=args.url),
+            },
+        )
     latency_ms = int((perf_counter() - start) * 1000)
 
     if page.status == 404:
@@ -108,7 +124,15 @@ async def scrape_http(deps: HttpToolDeps, args: HttpScrapeArgs) -> HttpScrapeRes
             )
         return HttpScrapeFailure(reason="upstream_error", latency_ms=latency_ms)
 
-    extracted = await _extractor.extract(html=str(page.body), source_url=str(page.url))
+    domain = urlparse(str(page.url)).hostname or ""
+    main_html = await select_main_content(
+        page=page,
+        domain=domain,
+        mission_id=deps.mission_id,
+        task_id=deps.task_id,
+        repo=SelectorRepository(),
+    )
+    extracted = await _extractor.extract(html=main_html, source_url=str(page.url))
     snapshot_key, snapshot_truncated = await persist_snapshot(
         user_id=deps.user_id,
         mission_id=deps.mission_id,

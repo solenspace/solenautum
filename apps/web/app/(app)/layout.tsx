@@ -1,10 +1,12 @@
 import { auth } from "@clerk/nextjs/server";
 import { redirect } from "next/navigation";
 
-import { SidebarProvider } from "@/components/ui/sidebar";
+import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { KeyboardShortcuts } from "@/shared/keyboard";
 import { CommandPalette } from "@/widgets/command-palette";
+import { DescriptionModeSlideover } from "@/widgets/description-mode-slideover";
 import { MissionSidebar } from "@/widgets/mission-sidebar";
+import { MultiUrlSlideover } from "@/widgets/multi-url-slideover";
 import { TopBar } from "@/widgets/top-bar";
 
 /**
@@ -21,17 +23,23 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   const { userId } = await auth();
   if (!userId) redirect("/sign-in");
 
+  // shadcn's `<Sidebar>` is `fixed inset-y-0 z-10` from the viewport top;
+  // the documented pattern is `<MissionSidebar /><SidebarInset>` so the
+  // inset gets the sidebar-aware width offset and the topbar lives next
+  // to (not under) the sidebar. Wrapping `<TopBar />` in a manual flex
+  // column put it at viewport top, where the sidebar's z-10 sat on top
+  // of the brand wordmark and the URL input's left edge.
   return (
     <SidebarProvider>
-      <div className="flex min-h-dvh w-full flex-col bg-background text-foreground">
+      <MissionSidebar />
+      <SidebarInset className="flex min-h-dvh flex-col overflow-hidden bg-background text-foreground">
         <TopBar />
-        <div className="flex flex-1 overflow-hidden">
-          <MissionSidebar />
-          <main className="flex-1 overflow-auto">{children}</main>
-        </div>
-        <CommandPalette />
-        <KeyboardShortcuts />
-      </div>
+        <div className="flex-1 overflow-auto">{children}</div>
+      </SidebarInset>
+      <CommandPalette />
+      <MultiUrlSlideover />
+      <DescriptionModeSlideover />
+      <KeyboardShortcuts />
     </SidebarProvider>
   );
 }

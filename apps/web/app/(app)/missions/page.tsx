@@ -1,18 +1,17 @@
-import { MissionDetailSlideover } from "@/widgets/mission-detail";
-import { TaskLaneCard } from "@/widgets/task-lane-card";
-
 import { EmptyState } from "./empty-state";
+import { WelcomeState } from "./welcome-state";
 
 /**
- * `/missions` — the only authenticated route in Spec 08. Owns the
- * composition of the slide-over body so the slide-over widget itself does
- * not cross-import a sibling widget (FSD rule).
+ * `/missions` — landing page when no specific mission is selected. The
+ * route-based detail (`/missions/[id]`) renders in this same outlet
+ * once a mission is opened, so this page is the empty/welcome surface
+ * the user sees on first visit and after closing a mission.
  */
 export default function MissionsPage() {
   return (
-    <>
+    <div className="flex h-full flex-col">
       <EmptyState />
-      <MissionDetailSlideover renderBody={(missionId) => <TaskLaneCard missionId={missionId} />} />
-    </>
+      <WelcomeState />
+    </div>
   );
 }

@@ -1,5 +1,29 @@
 import "@testing-library/jest-dom/vitest";
 
+import { vi } from "vitest";
+
+// Next.js client-router hooks need an app-router context which vitest's
+// jsdom env does not supply. Default to inert stubs so any component
+// that calls `usePathname()` / `useRouter()` renders cleanly. Per-test
+// `vi.mock("next/navigation", ...)` overrides this default when a test
+// needs to assert on `router.push` / a specific pathname.
+vi.mock("next/navigation", async () => {
+  const actual = await vi.importActual<typeof import("next/navigation")>("next/navigation");
+  return {
+    ...actual,
+    usePathname: () => "/missions",
+    useRouter: () => ({
+      push: vi.fn(),
+      replace: vi.fn(),
+      refresh: vi.fn(),
+      back: vi.fn(),
+      forward: vi.fn(),
+      prefetch: vi.fn(),
+    }),
+    useSearchParams: () => new URLSearchParams(),
+  };
+});
+
 // jsdom 29 ships an opaque localStorage proxy that does not implement the
 // Storage interface methods. Substitute a Map-backed Storage so feature code
 // using `localStorage.getItem`/`setItem` works under Vitest the same way it

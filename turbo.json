@@ -14,6 +14,11 @@
       "dependsOn": ["^build"],
       "outputs": ["coverage/**"]
     },
+    "e2e": {
+      "cache": false,
+      "dependsOn": ["build"],
+      "outputs": ["playwright-report/**", "test-results/**"]
+    },
     "typecheck": {
       "dependsOn": ["^typecheck"],
       "outputs": []
@@ -32,11 +37,7 @@
     },
     "format:check": {
       "outputs": [],
-      "inputs": [
-        "$TURBO_DEFAULT$",
-        "biome.json",
-        "pyproject.toml"
-      ]
+      "inputs": ["$TURBO_DEFAULT$", "biome.json", "pyproject.toml"]
     },
     "clean": {
       "cache": false

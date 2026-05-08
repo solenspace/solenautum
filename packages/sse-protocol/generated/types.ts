@@ -15,6 +15,7 @@ export type SseEvent =
   | TaskStart
   | TaskEnd
   | UrlDiscovered
+  | DiscoveryComplete
   | SelectorRecovered
   | Done
   | SseError;
@@ -80,6 +81,15 @@ export type UrlDiscovered = BaseEvent & {
      */
     source: string;
     score?: number;
+    [k: string]: unknown;
+  };
+  [k: string]: unknown;
+};
+export type DiscoveryComplete = BaseEvent & {
+  type: "discovery_complete";
+  content: {
+    count: number;
+    awaiting_approval: boolean;
     [k: string]: unknown;
   };
   [k: string]: unknown;

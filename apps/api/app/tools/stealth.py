@@ -12,16 +12,20 @@ from __future__ import annotations
 
 from time import perf_counter
 from typing import Literal
+from urllib.parse import urlparse
 from uuid import UUID
 
 from pydantic import BaseModel, Field
 from scrapling.fetchers import StealthyFetcher
 
-from app.concurrency import browser_slot
+from app.concurrency import current_mission_semaphores
 from app.extract import MarkdownExtractor
 from app.observability import observe
+from app.persistence.repository import SelectorRepository
 from app.persistence.snapshot import persist_snapshot
 from app.security import assert_robots_allows, assert_safe_url
+from app.tools._select import select_main_content
+from app.tools._storage import HashableStorageArgs, ProcessLruStorage
 from app.tools._waf import TERMINAL_WAFS, body_excerpt, detect_waf
 
 _extractor = MarkdownExtractor()
@@ -70,12 +74,18 @@ async def scrape_stealth(deps: StealthDeps, args: StealthScrapeArgs) -> StealthS
 
     start = perf_counter()
 
-    async with browser_slot():  # invariant 2
+    async with current_mission_semaphores().browser_slot():  # invariant 2 (layered)
         page = await StealthyFetcher.async_fetch(
             args.url,
             headless=True,
             network_idle=True,
             humanize=True,
+            # Spec 13: adaptive selector storage threaded into the Adaptor.
+            custom_config={
+                "auto_match": True,
+                "storage": ProcessLruStorage,
+                "storage_args": HashableStorageArgs(url=args.url),
+            },
         )
 
     latency_ms = int((perf_counter() - start) * 1000)
@@ -104,7 +114,15 @@ async def scrape_stealth(deps: StealthDeps, args: StealthScrapeArgs) -> StealthS
             )
         return StealthScrapeFailure(reason="upstream_error", latency_ms=latency_ms)
 
-    extracted = await _extractor.extract(html=str(page.body), source_url=str(page.url))
+    domain = urlparse(str(page.url)).hostname or ""
+    main_html = await select_main_content(
+        page=page,
+        domain=domain,
+        mission_id=deps.mission_id,
+        task_id=deps.task_id,
+        repo=SelectorRepository(),
+    )
+    extracted = await _extractor.extract(html=main_html, source_url=str(page.url))
     snapshot_key, snapshot_truncated = await persist_snapshot(
         user_id=deps.user_id,
         mission_id=deps.mission_id,

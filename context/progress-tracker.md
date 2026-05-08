@@ -7,12 +7,15 @@ resuming a session.
 
 ## Current Phase
 
-- Implementation phase begins.
+- Shipping. All 15 specs landed.
 
 ## Current Goal
 
-- Implementing `specs/10-taskgroup-runner.md` (TaskGroup runner +
-  per-mission browser semaphore; closes Spec 08's invariant-3 deviation).
+- All implementation specs (01–15) are complete. Autumn is feature-
+  complete in dev and deployable to Fly.io (api) + Vercel (web). Next
+  phase is real-world traffic, observability tuning, and whatever
+  product feedback surfaces. Outstanding deferred work lives in Open
+  Questions; nothing in the implementation phase is unresolved.
 
 ## Completed
 
@@ -410,25 +413,564 @@ resuming a session.
   Vitest reports 30 passed (5 test files including the new
   `result-preview.test.tsx`).
 
+- **Spec 10 — concurrent-task-execution.** Single-URL agent became a
+  concurrent N-URL agent (1–20 URLs per mission). `apps/api/app/runner.py`
+  rewritten around a `MissionRunner` class that owns one
+  `asyncio.TaskGroup` per mission and spawns one `_run_task` coroutine
+  per URL; each coroutine runs `agent.run(url)` and emits its own
+  `task_start`/`task_end` events. Per-mission semaphores
+  (`MissionSemaphores.http=20`, `browser=3`) layer over Spec 09's
+  global ceilings via a stacked `async with self.http, _GLOBAL_HTTP`;
+  binding flows through `contextvars.ContextVar` so
+  `TaskGroup.create_task` propagates the mission scope to children
+  without changing tier-tool signatures. `apps/api/app/concurrency.py`
+  gains `MissionSemaphores`, `with_mission_semaphores`,
+  `current_mission_semaphores`. `apps/api/app/tools/http.py` now
+  acquires a layered HTTP slot (Spec 09 had no gate on the HTTP
+  tier); `tools/stealth.py` and `tools/dynamic.py` swap their direct
+  `browser_slot()` calls for the layered helper. The legacy
+  `_spawn_detached` + `_inflight_tasks` is gone — Spec 08's
+  invariant-3 deviation (Open Question 7) is closed. The lifespan
+  TaskGroup wired in `apps/api/app/main.py` adopts each `MissionRunner`
+  via `emitter.adopt_runner(...)`; `apps/api/app/sse.py` exposes
+  `bind_lifespan_tg()` and `adopt_runner()`, and a `_RunnableMission`
+  Protocol avoids the runner→sse→runner import cycle. Runner errors
+  are wrapped in `_shielded_run` so a single mission failure does not
+  abort the lifespan group. Cancellation mechanic: `MissionRunner.
+  request_cancellation()` flips an `asyncio.Event`; tasks observe at
+  entry and bail with `Status.CANCELLED`; mid-flight `CancelledError`
+  emits a `task_end:cancelled` before re-raising (invariant 5).
+  `apps/api/app/runner_helpers.py` renames `_last_ok_tool_call` →
+  `last_ok_tool_call` (now a public helper) and adds
+  `compute_mission_status_from_db` (rolls task statuses up:
+  succeeded if all OK, failed if any failed, else cancelled) and
+  `emit_mission_terminal` (formats the mission `done` event).
+  `TaskRepository` adds `list_by_mission` (ownership-scoped via the
+  Task→Mission join). `apps/api/app/observability.py::start_mission_trace`
+  becomes `task_id`-optional — multi-task missions don't carry one
+  task_id at the trace level. Routes: `POST /missions` body switches
+  to `urls: list[Annotated[str, StringConstraints(max_length=2048)]]`
+  with `Field(min_length=1, max_length=20)`; the legacy
+  `GET /run-mission?url=...` and `run_url_mission` are dropped (the
+  test fixtures migrated to `POST /missions` + `GET /run-mission/
+  {id}/stream`). Web side: new `apps/web/widgets/multi-url-slideover/`
+  composes 1–20 URLs in a Sheet (right side, sm:max-w-2xl) with a
+  `<textarea rows={12}>`, zod validation returning i18n keys
+  (`missionUrlsRequired`/`TooMany`/`Invalid`), Cmd+Enter submit, Esc
+  close. Mounted in `app/(app)/layout.tsx`; opened from the command
+  palette via a new `<CommandItem onSelect={openMultiUrl}>` with
+  shortcut `⌘⇧N` and `ListPlus` icon. `useMissionStore` gains
+  `multiUrlOpen`/`openMultiUrl`/`closeMultiUrl`; `useSubmitMission`
+  extracts `submitMany(urls)` (single-URL `submit` becomes a thin
+  wrapper). Seven new i18n keys: `mission.newMultiUrlMission`,
+  `multiUrlHelp`, `multiUrlPlaceholder`, `urlCount{,_one,_other}`,
+  `validation.missionUrls{Required,TooMany,Invalid}`. **Heartbeat
+  deviation from Section E** (greenlit before implementation): the
+  existing per-stream `asyncio.wait_for(timeout=_HEARTBEAT_INTERVAL_S)`
+  in `sse.py:120-122` is functionally complete; restructuring it into
+  a per-mission task that pushes pre-formatted bytes through the
+  queue (with a queue-type churn) was rejected in favor of keeping
+  the simpler design and adding `test_sse_heartbeat.py` to prove it.
+  Three new pytest files: `test_concurrency_layered.py` (HTTP-20 and
+  browser-3 caps + cancellation release + ContextVar propagation
+  through TaskGroup children), `test_runner_taskgroup.py`
+  (concurrency, cancellation-before-run, no-detached-tasks; 4 cases),
+  `test_sse_heartbeat.py` (heartbeat fires within patched interval +
+  heartbeats do not consume seq). Two existing route tests
+  (`test_run_mission_route.py`, `test_runner_error_propagation.py`)
+  migrated from the legacy GET to POST + GET stream and gained a
+  `_FakeChain` so they no longer depend on `OPENROUTER_API_KEY`/
+  `GROQ_API_KEY`. Two new web Vitest files: `multi-url-slideover.
+  test.tsx` (6 cases including pluralization), and additions to
+  `use-submit-mission.test.tsx` covering `submitMany`. **Verification
+  gate**: `pnpm typecheck` exits 0; `pnpm lint` exits 0; pytest 70
+  passed / 19 skipped; Vitest 39 passed across 6 files; `pnpm build`
+  exits 0; `grep -n "asyncio.create_task" apps/api/app/runner.py`
+  is empty; `grep -rn "TODO(spec-10)" apps packages` is empty. Open
+  Question 7 closed; Open Question 1 marked resolved (mechanic
+  shipped, user-facing endpoint deferred to Spec 14).
+
+- **Spec 11 — multi-lane-web-ui.** Spec 08's single `TaskLaneCard`
+  retired; the slide-over now renders `apps/web/widgets/task-lane-stack/`
+  — a sticky four-field aggregate header (`{succeeded}/{total} done`,
+  `{running} streaming`, `{failed} errored`, mm:ss `elapsed`) plus a
+  vertical stack of `TaskLaneRow`s. **Three new hooks** under
+  `apps/web/features/run-mission/`: `useTaskLanes` projects
+  `useMissionStream`'s events into per-task lanes via a `useMemo` on
+  `events`, with per-task `startedAt` / `lastTokenAt` / `finishedAt`
+  held in a sibling `useRef<Map>` *outside* the memo (a fresh
+  `Date.now()` inside the loop would shift these forward on every
+  re-projection — the spec pseudocode's drift bug; the timestamps
+  advance only when first-seen or when a per-task token count grows);
+  `useLaneFocus` owns the J/K index + Enter-pin set with wrap and
+  index-clamping when lanes shrink; `useMissionSummary` aggregates
+  counts and drives a 500ms elapsed clock that freezes once every
+  lane is terminal. **Lane row** uses data-attribute styling
+  (`data-focused`, `data-status`, `data-user-expanded`,
+  `data-expanded`) and a `setTimeout`-driven re-render at the 1.5s
+  auto-collapse boundary; expansion priority is focus → pin →
+  pending/running → failed/cancelled → succeeded-within-1.5s. **Three-
+  mode reasoning** in `reasoning-stream.tsx`: focused = full text,
+  unfocused-active = last 80 chars (`line-clamp-1 truncate`),
+  unfocused-idle (≥ 5s since `lastTokenAt`) = `…thinking` chip; a 1s
+  internal interval drives the threshold. **InlineErrorChip extracted**
+  out of Spec 09's `result-preview.tsx` into its own file with a
+  cleaner `{ code, message, detectedProtections? }` prop bag (no more
+  synthetic SseError construction in callers); `result-preview.tsx`
+  trims to a `{ preview }` string prop. **Mobile breakpoint (< 768px)**
+  via the existing `useIsMobile()` hook: stack collapses to a single
+  visible focused lane, `react-swipeable`'s `useSwipeable` maps
+  swipe-left/right to `focus.next/previous`, and a strip in the
+  aggregate header shows `{focusIndex+1}/{total}` plus a row of small
+  status dots (one per lane). **ARIA**: a single `role="status"
+  aria-live="polite"` region on the slide-over root carries milestone
+  announcements only — mission start (once), per-lane terminal,
+  mission complete, mission-level error; lane bodies set
+  `aria-live="off"` so screen readers read content on demand. Eleven
+  user-facing keys plus two plural pairs added to the `mission`
+  namespace (`headerDone{,_one,_other}`, `headerStreaming`,
+  `headerErrored`, `headerElapsed`, `reconnecting`, `connecting`,
+  `ariaMissionRegion`, `ariaMissionStarted{,_one,_other}`,
+  `ariaLaneTerminal`, `ariaMissionComplete`, `ariaMissionFailed`).
+  **Page-level wiring** updated `apps/web/app/(app)/missions/page.tsx`
+  to render `TaskLaneStack`; the slide-over widget is unchanged
+  (composition stays at the page layer per FSD). The
+  `apps/web/widgets/task-lane-card/` directory was deleted; the
+  carry-overs (`tier-badge.tsx`, `result-preview.tsx`, the new
+  `inline-error-chip.tsx`) live under
+  `apps/web/widgets/task-lane-stack/`. Eight new test files: three
+  hook tests (`use-task-lanes.test.ts` 7 cases — projection, ordering,
+  tool pairing, error capture, startedAt stability;
+  `use-lane-focus.test.ts` 8 cases — wrap, pin/unpin, clamp;
+  `use-mission-summary.test.ts` 5 cases — counts, ticking, freeze) and
+  five widget tests (`reasoning-stream.test.tsx` 5 cases for the three
+  modes + transition; `aggregate-header.test.tsx` 4 cases;
+  `task-lane-row.test.tsx` 7 cases including the 1.5s auto-collapse;
+  `inline-error-chip.test.tsx` 6 cases ported from Spec 09's
+  result-preview test; `result-preview.test.tsx` 3 cases;
+  `task-lane-stack.test.tsx` 9 cases — desktop/mobile end-to-end with
+  mocked `useMissionStream` + `useIsMobile`). **Verification gate**:
+  `turbo run typecheck` exits 0; `turbo run lint` exits 0 (Biome a11y
+  rules pass); `turbo run build` exits 0; web Vitest 84 passed across
+  14 files; `git ls-files apps/web/widgets/task-lane-card` returns
+  empty.
+
+- **Spec 12 — url-discovery-tavily.** Adds the description-mode
+  mission flow end-to-end. **Search seam**: a new `app/search/` package
+  exposes `SearchProvider` Protocol and `DiscoveredUrl` pydantic v2
+  model; `TavilyProvider` is the only implementation today (raw `httpx`
+  POST against `https://api.tavily.com/search`, `max_results=20`,
+  `search_depth="basic"`, owned-client lifecycle). **Per-mission cost
+  cap** at three layers: discovery agent's system prompt instructs
+  exactly one call, `discover_urls` tool rejects a second call within
+  the same mission via a `contextvars.ContextVar[frozenset[UUID]]` (set
+  union, never `.add()` — copy-on-write keeps concurrent missions
+  isolated), and the provider clamps `max_results` server-side.
+  **Defense-in-depth SSRF**: `assert_safe_url` runs against every
+  Tavily-supplied URL inside `discover_urls` before the URL becomes a
+  `url_discovered` SSE event or lands in the `discovered_urls` jsonb
+  column — the `/approve` endpoint re-validates after user edits, and
+  any unsafe URL collapses to `DiscoveryFailure(reason="no_results")`
+  if all results are dropped. **Discovery agent** (`build_discovery_agent`
+  in `app/agent.py`) lives alongside the original `build_agent`; both
+  use `defer_model_check=True` so `LLMProviderChain` swaps providers
+  per-run. Output type `DiscoveryMissionResult` is the agent's
+  contract (pass `prompt-engineer`'s output_type rule). **Migration
+  `0002_add_mission_phase_and_skip_approval`** adds a `mission_phase`
+  enum and four mission columns (`phase`, `skip_approval`,
+  `discovered_urls`, `approved_urls`); RLS inheritance on the existing
+  `missions` row policy means no policy update was needed.
+  `start_url_mission` writes `phase=SCRAPING` before adopting the
+  runner; `MissionRunner.run` writes `phase=DONE` after the rolled-up
+  `done` emit so URL-mode and description-mode missions both populate
+  the column uniformly. **Approval registry** in `app/runner.py`:
+  `register_pending_approval` allocates an `asyncio.Event` keyed on
+  `mission_id`; `submit_approval` returns
+  `Literal["accepted", "no_pending"]` so the route can emit a 503
+  instead of silently 204'ing on post-restart orphan; the runner's
+  `wait_for_approval` is bounded by a kwarg-threaded `timeout_s`
+  (default 1800.0; tests pass `0.05`). `DescriptionMissionRunner`
+  dataclass adapter wraps `run_description_mission` so
+  `adopt_runner` (which expects `_RunnableMission.run() ->
+  Awaitable[None]`) accepts it without a Protocol relaxation.
+  **`run_description_mission` body** wraps the entire workflow in a
+  `try/except/finally` with a `terminal_emitted: bool` flag so any
+  programming error still emits a mission-level `done`/`error`
+  (invariant 5 at the mission level, beyond the inner `MissionRunner`'s
+  per-task guarantees). **Polymorphic `POST /missions`** uses a
+  pydantic discriminated union (`mode: Literal["url"|"description"]`)
+  with `mode="url"` defaulted so the existing single-array client
+  shape continues to parse; `POST /missions/{id}/approve` validates
+  ownership (RLS + repo lookup), phase (`AWAITING_APPROVAL`), and
+  SSRF on every URL. **SSE protocol**: `DiscoveryComplete` event
+  added to `schema.json` `oneOf` and `$defs`; codegen regenerated
+  TS + pydantic v2 RootModel. **Web**: a new `discovery` namespace
+  was rejected in favor of extending `mission`, `common`, and
+  `validation` (matching project convention); 16 keys total
+  including `_one`/`_other` plurals for `searching`,
+  `discoveryComplete`, `approveNUrls`. **CSS**: missing
+  `--state-warn` token added (`#9e8c3a` light / `#d4b856` dark per
+  `ui-context.md`) plus the `--color-state-warn: var(--state-warn)`
+  Tailwind bridge so `bg-state-warn` compiles. **Web hooks**:
+  `useMissionPhase(events)` derives the phase from the SSE event
+  stream; `useDiscoveredUrls(events, seed?)` reduces and de-dupes
+  `url_discovered` events; `useApprovalState(missionId,
+  discoveredUrls)` owns the gate's `Set<string>` selection,
+  `Record<string, string>` edits map, sort/filter, and the submit
+  POST. **`ApprovalGate` widget tree**: `index.tsx` orchestrator,
+  `url-row.tsx` (28px, ref+effect focus instead of `autoFocus` to
+  pass Biome a11y), `score-pill.tsx` (color band per `>= 0.8 / 0.5 /
+  <0.5`), `bulk-toolbar.tsx` (sticky bottom; Cmd+Enter primary),
+  `domain-filter-strip.tsx` (chip-strip, Esc clears),
+  `discovered-list.tsx` (read-only streaming list),
+  `discovery-header.tsx` (pulsing/static dot variant). The
+  description-mode form lives in
+  `apps/web/widgets/description-mode-slideover/index.tsx` —
+  single-textarea + skip-approval checkbox; opened from the command
+  palette ("New description-mode mission", `⌘⇧D` global shortcut)
+  and submitted via Cmd+Enter. **Slide-over state machine** lives at
+  `apps/web/app/(app)/missions/slide-over-content.tsx` (page-layer
+  composition, FSD-clean) — switches on `useMissionPhase` to render
+  the discovery list, the approval gate, the task-lane stack, or a
+  connecting placeholder. **BFF route** `app/api/missions/[id]/approve/
+  route.ts` (Node runtime; matches the SSE proxy) forwards the
+  approval body to the api. **Tests**: 4 new pytest files (29 tests:
+  `test_tavily_provider.py` 6, `test_discover_tool.py` 7,
+  `test_description_runner.py` 5 — DB-skip, `test_approval_endpoint.py`
+  6 — DB-skip; the SSE round-trip case for `discovery_complete` adds
+  3 to `test_sse_protocol.py`); 3 new Vitest files (24 tests:
+  `url-row.test.tsx` 9, `bulk-toolbar.test.tsx` 8,
+  `use-approval-state.test.ts` 7); plus the `discovery_complete`
+  case added to `packages/sse-protocol/tests/round-trip.test.ts`.
+  **Verification gate**: `turbo run lint` exits 0; `turbo run
+  typecheck` exits 0; `turbo run test` exits 0 (api 86 passed / 30
+  skipped, web 109 passed across 17 files, sse-protocol 10 passed);
+  `turbo run build` exits 0 — `/api/missions/[id]/approve` registered
+  in the Next route manifest. Open Question 2 (Tavily vs Exa) stays
+  open per the spec's Done-when list — revisit after real-world
+  quality data.
+
+- **Spec 13 — adaptive-selectors.** Wires Scrapling 0.2.99's adaptive
+  selector machinery into every tier tool. **`select_main_content`**
+  (`apps/api/app/tools/_select.py`) sits between fetch and Crawl4AI
+  extraction in `http.py`/`stealth.py`/`dynamic.py`; uses a comma-list
+  CSS selector (`main, [role="main"], article, div.main, ...`), tries
+  the literal pattern with `auto_save=True`, and on miss-with-existing
+  tries similarity-based relocation at `percentage=70`. Crawl4AI then
+  runs over the *scoped* HTML — meaningfully smaller and cleaner than
+  the whole body. **Storage backend**:
+  `ProcessLruStorage(StorageSystemMixin)` at
+  `apps/api/app/tools/_storage.py` is wired via `BaseFetcher.custom_config`
+  on each fetch (`{"auto_match": True, "storage": ProcessLruStorage,
+  "storage_args": {"url": args.url}}`) — the spec's monkey-patch
+  pattern would have failed because Scrapling 0.2.99 builds `_storage`
+  at `Adaptor.__init__` time and `parser.py:114-118` hard-asserts
+  `hasattr(storage, "__wrapped__")`. **LRU cache** at
+  `apps/api/app/persistence/selector_cache.py` (cachetools 7.1
+  `LRUCache(maxsize=1000)`, keyed on `(domain, purpose)` per invariant
+  8). **`SelectorRepository`** refactored: `get` → `find` (read-through
+  to LRU); `upsert` switched to `INSERT … ON CONFLICT (domain, purpose)
+  DO UPDATE SET payload, failure_count=0, last_used_at` (closes Open
+  Question 6 — atomic, race-free); new methods `bump_hit_count`,
+  `bump_failure_count` (auto-deletes at threshold ≥ 3),
+  `delete`, `evict_older_than` (returning-driven). **Migration 0003**
+  (`a3e1cba17f24_add_failure_count`) adds the `failure_count INTEGER
+  NOT NULL DEFAULT 0` column with a clean `op.drop_column` downgrade.
+  **TTL sweep** (`apps/api/app/jobs/selector_sweep.py`) runs every 6 h
+  inside the lifespan TaskGroup (invariant 3 holds — structured
+  shutdown via `CancelledError`); evicts rows where `last_used_at <
+  now() - 30d` plus their LRU entries. **`SelectorPurpose`** StrEnum
+  has a single member (`MAIN_CONTENT`); new purposes are a one-line
+  addition. **`selector_recovered` event** (Spec 06's schema, already
+  generated): emitted from `select_main_content` only on a true
+  adaptive rescue (literal miss → similarity hit), with `hit_count` ≥
+  1 by construction; pre-emit `bump_hit_count` returning 0 short-
+  circuits the emit so the schema's `minimum: 1` constraint is never
+  violated. **Web**: `TaskLane.selectorRecoveryCount?: number` field +
+  projection case in `use-task-lanes.ts`; new
+  `SelectorRecoveryChip` widget (Sparkle icon, font-mono `[11px]`,
+  plural-aware via `t("mission","selectorsRecovered",{count})`,
+  tooltip from `selectorsRecoveredHint`); rendered in
+  `task-lane-row.tsx` next to the tool-chip row when count > 0. Four
+  new i18n keys under `mission`. **Tests**: 8 new pytest cases in
+  `test_selector_repository.py` (round-trip, ON-CONFLICT no-collision,
+  `upsert` resets failure_count, monotonic `bump_hit_count`,
+  three-strikes eviction, `delete` cache eviction, `evict_older_than`
+  + LRU clear) and 4 in `test_select_main_content.py` (first run /
+  drifted-DOM recovery / three-failure eviction / no-existing
+  fallback) — both DB-gated, skip cleanly without Neon. 1 new Vitest
+  case in `use-task-lanes.test.ts` (count partitioning by lane); 3 in
+  `selector-recovery-chip.test.tsx` (singular / plural / tooltip).
+  **Spec divergences from the original text** (forced by Scrapling
+  0.2.99 pin from Open Question 11): `auto_match` not `adaptive` on
+  `.css()`; storage threaded via `custom_config` not post-fetch
+  monkey-patch; sync `save()` writes the LRU only with the DB
+  write-through made explicit at the next yield point in the wrapper
+  (the spec's `loop.create_task(...)` would have detached from the
+  lifespan group, violating invariant 3); `MarkdownExtractor.extract`
+  takes `str` not `bytes` so the spec's `.encode("utf-8")` was
+  dropped. **Verification gate**: `turbo run lint` exits 0; `turbo
+  run typecheck` exits 0; `turbo run test` exits 0 (web 113 passed
+  across 18 files, api 86 passed / 42 skipped — the new selector
+  tests join the existing DB-gated set); `turbo run build` exits 0.
+  Open Question 6 closed (race window gone). Open Question 5
+  (cross-tenant selector visibility) stays open — deferred decision.
+
+- **Spec 14 — cost-and-mission-lifecycle.** Closes every user-facing
+  mission-lifecycle surface earlier specs deferred. **Cancellation**:
+  `DELETE /missions/{id}` calls `MissionRunner.request_cancellation()`;
+  `DELETE /missions/{id}/tasks/{task_id}` adds the task id to the
+  runner's `_cancelled_task_ids` set. The runner now checks
+  `_is_cancelled(task_id)` at three step boundaries inside `_run_task`
+  (entry, post-`task_start`, post-invariant-10 read) so a cancel
+  arriving in either race window still settles the row to `CANCELLED`
+  and emits exactly one `task_end` (invariants 5 + 7 hold under per-task
+  cancel). The endpoints route via `SseEmitter._active_runners`, a new
+  process-level dict populated in `adopt_runner` and cleaned up in the
+  `_shielded_run` `finally`. Idempotent: a second DELETE on a terminal
+  mission returns 204 with `x-mission-state` carrying the current
+  status. The "rare-edge" branch (no live runner — runner process died
+  while the row stayed `RUNNING`) writes the row to `CANCELLED` AND
+  emits a synthetic mission-level `done(cancelled)` (or `task_end` for
+  the per-task variant) so any client attached within the 60s eviction
+  grace observes the terminal event — invariant 5 holds even on this
+  branch. The originally-planned "DB-only" trade-off was rejected after
+  scrape-pipeline-doctor and sse-streaming-reviewer flagged the gap
+  during agent review. **Description-mode cancel routing**: the
+  `code-reviewer` agent caught a critical gap — `DescriptionMissionRunner`
+  is the wrapper registered in `_active_runners`, but it had no
+  `request_cancellation` / `cancel_task` methods, so cancels during the
+  SCRAPING phase fell through to the rare-edge synthetic-terminal path
+  while the inner `MissionRunner` continued executing (duplicate `done`
+  events, silent loss of per-task cancel intent). Fixed by giving the
+  wrapper both methods plus a `set_inner_runner` hook called from
+  `run_description_mission` once the inner runner is constructed. For
+  the AWAITING_APPROVAL case, the wrapper wakes the parked approval via
+  `submit_approval(approved_urls=[])` so the existing "no URLs survived
+  approval" branch emits exactly one terminal `done(cancelled)`. A
+  `_cancellation_requested` flag on the wrapper closes the race where a
+  cancel arrives between `submit_approval(no_pending)` and
+  `register_pending_approval`. **Post-review refactors**: factored the
+  three-line cancel block at each `_run_task` checkpoint into
+  `MissionRunner._settle_cancelled(task)` so the DB-before-SSE ordering
+  cannot drift; added `emit_task_terminal` in `runner_helpers.py`
+  consumed by both `MissionRunner._emit_task_end` and the rare-edge
+  task-cancel route (eliminates inline `SseEvent.model_validate` in
+  `routes.py`); replaced direct `_active_runners` mutations from
+  `_shielded_run` with `SseEmitter._register_runner` /
+  `_release_runner` private methods (encapsulation); ran cost fetch +
+  status compute concurrently via `asyncio.gather` (saves one
+  round-trip on every mission terminal); bound `fetch_mission_cost_cents`
+  with a 5s `asyncio.wait_for` deadline so a hung Langfuse cannot pin
+  the terminal for the SDK's default 60s socket timeout; bound
+  `reap_orphans` SQL literals from `Status` / `MissionPhase` enums so a
+  future enum rename can't silently break the reaper; removed unused
+  `cancelTask` i18n key. **Cost write-back**: a new
+  `fetch_mission_cost_cents(mission_id)` helper in `observability.py`
+  wraps `_client.fetch_trace` in `asyncio.to_thread`, catches all
+  exceptions, returns `int | None`. The runner's terminal block calls
+  it before the status / phase writes and threads the result through
+  `emit_mission_terminal(..., cost_cents=)`, so a slide-over reattach
+  observes the cost before the `done` event lands (invariant 7). A
+  Langfuse failure leaves `cost_cents = 0` and the sidebar renders
+  `?` for terminal missions with zero cost. **Snapshot**:
+  `GET /missions/{id}/tasks/{task_id}/snapshot` returns 302 with a
+  freshly-generated 1-hour signed URL (`get_blob_store().signed_url`).
+  The BFF route uses `redirect: "manual"` and relays the upstream
+  `Location` header verbatim — the Clerk JWT never reaches the R2 hop.
+  In dev (local-fs blob backend, gated on `NODE_ENV`) the web disables
+  the link with a hint because browsers refuse `file://` redirects.
+  **Reaper**: `apps/api/app/jobs/orphan_reaper.py` mirrors the Spec 13
+  selector-sweep skeleton (injectable interval / age, `CancelledError`
+  early return, bare `Exception` log-and-continue). Every 5min it runs
+  `MissionRepository.reap_orphans(cutoff)` which UPDATE-cancels
+  pending-or-`awaiting_approval` missions older than 1h (idempotent —
+  second sweep returns 0). The reaper uses a new `system_transaction()`
+  helper in `db.py` that issues `SET LOCAL row_security = off` to
+  bypass RLS for cross-user system work; the connection role must have
+  `BYPASSRLS` (Neon's `neondb_owner` and the local Postgres superuser
+  both qualify; documented in the helper docstring). **Sidebar**: new
+  `awaiting_approval` group ordered after `running` (derived from
+  `status === "running" && phase === "awaiting_approval"`); each row
+  shows cost on the right (`$X.XXX` if `cost_cents > 0`, `?` if zero
+  on terminal, empty otherwise — handles the NOT-NULL `cost_cents`
+  column without a sentinel). **Slide-over**: a new
+  `headerAction?: ReactNode` slot on `MissionDetailSlideover` carries
+  the `<CancelMissionButton missionId>` from `features/run-mission/`,
+  composed in by the page layer to keep the wrapper composition-only
+  (FSD). **Per-task cancel**: `useShortcut("x", ...)` is now state-
+  aware — cancels for `pending`/`running` lanes (via a new
+  `useTaskCancel` hook), unpins for terminal lanes; the pin/unpin
+  affordance moved to a small `Pin`/`PinOff` icon button next to the
+  chevron in `task-lane-row`. **i18n**: 6 new keys under `mission`
+  (`cancelMission`, `cancelTask`, `downloadHtml`, `downloadHtmlDevHint`,
+  `unpin`, `pin`, `status_awaiting_approval`). **Tests**: 4 new pytest
+  files (`test_cancellation_endpoints.py` — 10 cases including the
+  per-task-cancel-isolates invariant-5 guard;
+  `test_orphan_reaper.py` — 6 cases including idempotency and a
+  loop-runs-once-and-returns-on-cancel; `test_snapshot_endpoint.py` —
+  4 cases including the cross-tenant 404 and path-id mismatch;
+  `test_cost_writeback.py` — 3 cases including
+  `test_langfuse_failure_leaves_cost_zero_and_still_emits_done`).
+  3 new Vitest files (`cancel-mission-button.test.tsx`,
+  `sidebar-awaiting-approval.test.tsx`,
+  `result-preview-snapshot.test.tsx`). **Spec divergences from the
+  original text**: (1) Spec D's pseudocode wrote a new
+  `_emit_mission_terminal` method on the runner — the actual code uses
+  the existing free function `emit_mission_terminal` from
+  `runner_helpers.py` (which already accepted `cost_cents`), so the
+  cost write was wired at the existing call site instead. (2) Spec E's
+  lifespan snippet used `emitter._runners._tg = tg` — replaced with the
+  existing public `bind_lifespan_tg`. (3) Spec I's `cost_cents != null`
+  rendering check would never fire because the column is `NOT NULL
+  DEFAULT 0` — replaced with `cost_cents > 0`, with `?` rendered when
+  zero on a terminal mission. (4) The reaper needed RLS-bypass for
+  cross-user UPDATEs; the spec assumed direct-UPDATE access. Solved
+  by `system_transaction()` rather than a new alembic migration.
+  **Verification gate**: `turbo run lint` exits 0; `turbo run
+  typecheck` exits 0; `turbo run test` exits 0 (web 126 passed across
+  21 files, api 86 passed / 66 skipped — the new DB-gated tests join
+  the existing skipped set); `turbo run build` exits 0.
+
+- **Spec 15 — hardening-and-e2e.** Final spec; takes Autumn from
+  feature-complete in dev to deployable on Fly.io + Vercel with
+  end-to-end coverage. **Structured logging**: `structlog` replaces
+  every `import logging` call in `apps/api/app/**` (8 modules — observability,
+  sse, runner, llm/chain, llm/probe, tools/_select, jobs/orphan_reaper,
+  jobs/selector_sweep). New `apps/api/app/logging.py` owns
+  `configure_logging()`; called from `app/main.py` at module import time
+  before FastAPI construction. JSON renderer in production
+  (`LOG_FORMAT=json` default), `ConsoleRenderer(colors=False)` for
+  dev. `uvicorn.access` log silenced. Per-task `mission_id` / `task_id`
+  bound via `structlog.contextvars.bound_contextvars(...)` wrapping the
+  body of `MissionRunner._run_task` — every log line emitted from
+  inside that scope (including from nested tools, LLM chain, SSE
+  emitter) carries both ids without threading them through every call
+  site. **Liveness + readiness split**: `/health` (cheap, always 200)
+  and `/health/ready` (Postgres `SELECT 1` in 0.5s, blob backend
+  reachable in 1s, Clerk Backend API health in 2s). `_check_blob_store`
+  branches on `R2BlobStore` vs `LocalFsBlobStore`; the R2 case runs
+  `head_bucket` via `asyncio.to_thread` (boto3 sync). Total worst-case
+  3.5s — under Fly's 5s probe `timeout`. Returns 503 with per-component
+  `checks: {...}` body when any dep is down. **Container image**:
+  `apps/api/Dockerfile` on `pyd4vinci/scrapling:latest` (Playwright +
+  Chromium preinstalled, ~5min saved per build). Pulls `uv` from its
+  own image (no curl bootstrap). Splits `uv sync` into two passes —
+  `--no-install-project` for cached dep layer, then `--no-editable` once
+  source is on disk — so code-only changes reuse the resolver layer.
+  CMD pins `--workers 1` (invariant-load-bearing: lifespan TaskGroup is
+  process-local). `apps/api/.dockerignore` keeps `.venv`, `data/`,
+  test suites out of the image. **Build context**: monorepo root,
+  *not* `apps/api/`, because `pyproject.toml` declares
+  `autumn-sse-protocol` as a workspace dep at
+  `../../packages/sse-protocol/generated/python` — that path must
+  resolve at `uv sync` time. Local: `docker build -t autumn-api -f
+  apps/api/Dockerfile .`; Fly: `fly deploy --config apps/api/fly.toml`
+  from monorepo root. **fly.toml**: single-region (iad), shared-CPU /
+  1GB, `auto_stop_machines = "stop"` for free-tier cost discipline,
+  `[[http_service.checks]]` pointed at `/health/ready`. **vercel.json**:
+  monorepo-aware `installCommand` + `buildCommand` reaching back to
+  the repo root for the Turbo cache. **Playwright e2e**:
+  `apps/web/playwright.config.ts` boots both servers (web on 3000, api
+  on 8000) via `webServer: [...]`. `tests/e2e/global-setup.ts` boots a
+  fixture HTTP server on `:9999` and calls `clerkSetup()` from
+  `@clerk/testing/playwright`. `tests/e2e/mission-flow.spec.ts` covers
+  two flows: 5-URL mission renders end-to-end (5 lanes reach
+  `succeeded`); forced disconnect mid-stream surfaces "Reconnecting…"
+  then resumes via `Last-Event-ID`. `setupClerkTestingToken({ page })`
+  bypasses sign-in via Clerk's official testing token — zero
+  production DOM pollution. Tests `test.skip()` unless `AUTUMN_E2E=1`
+  is set so casual `pnpm e2e` doesn't flake on missing infra.
+  **pytest API integration**: `apps/api/tests/integration/` with
+  `__init__.py`, `conftest.py` (three fixtures: `fake_user`,
+  `seeded_user`, `asgi_client` plus `stub_url_mode_pipeline`,
+  `stub_description_mode_pipeline`, `_FakeScrapeAgent`,
+  `_FakeDiscoveryAgent`, `_FakeChain`), and `test_mission_lifecycle.py`
+  (3 tests: 5-URL event sequence, 5-URL DB persistence,
+  description-mode full lifecycle). Real FastAPI app via
+  `httpx.ASGITransport`; lifespan TaskGroup bound via
+  `app.router.lifespan_context(app)`. SSE consumer pattern uses
+  `aiter_text` + buffered `\n\n` split — handles half-frame chunks.
+  **Ops doc**: spec listed `RUNBOOK.md` at repo root as a deliverable,
+  but the user rejected it on sight per the no-root-level-docs rule.
+  Ops content is captured here in the progress tracker and inline in
+  commit / PR descriptions instead. **Spec divergences from the original text**:
+  (1) Spec assumed `from app.persistence.db import _engine`; actual
+  export is `_get_engine()` factory (lazy `lru_cache`'d). Used the
+  factory. (2) Spec's `_head_bucket` used `blob._client.meta.config.region_name`
+  as the bucket parameter — that is `"auto"`, not the bucket. Fixed
+  to `blob._bucket`, with `LocalFsBlobStore` branch checking
+  `_root.exists()`. (3) Spec's `https://api.clerk.com/.well-known/jwks.json`
+  is a 404 (per-instance JWKS lives on the Frontend API, not the
+  central Backend API). Switched to `https://api.clerk.com/v1/health`
+  which is Clerk's documented public health endpoint (200). (4) Spec
+  proposed `[data-testid="clerk-test-sign-in"]` for Playwright sign-in;
+  switched to `@clerk/testing/playwright`'s `setupClerkTestingToken`
+  (Clerk's official testing pattern, zero production DOM changes).
+  (5) Spec's Playwright config booted only the web server; added a
+  second `webServer` entry for the api on `:8000`. (6) Spec's `uv sync`
+  step in the Dockerfile failed because the project tries to install
+  itself before code is copied; split into `--no-install-project` +
+  `--no-editable` passes. (7) Spec's `docker build apps/api` context
+  cannot reach `packages/sse-protocol/`; flipped the build context to
+  the monorepo root. **Carry-forward**: Q11 (lxml/scrapling pin),
+  Q12 (mission-level deadline guard), Q13 (`tier_used` post-escalation),
+  Q14 (architecture.md doc drift) deferred to post-MVP per spec
+  §Out-of-Scope. **Post-review simplify pass**: parallel reuse +
+  quality + efficiency reviewers caught four follow-ups. (1) Fixture
+  HTTP server in `apps/web/tests/e2e/global-setup.ts` had no teardown
+  — `globalSetup` now returns an async teardown that closes the
+  server. (2) `_check_blob_store` in `app/main.py` reached into
+  `R2BlobStore._client` / `_bucket` and `LocalFsBlobStore._root` —
+  added an abstract `BlobStore.health_check()` method on the ABC,
+  implemented per-backend (`R2BlobStore.health_check` runs
+  `head_bucket` via `asyncio.to_thread`; `LocalFsBlobStore.health_check`
+  checks `_root.exists()`); the readiness route now passes
+  `get_blob_store().health_check` directly to `_safe_probe` — no
+  private-attr access at the readiness layer. (3) Three near-identical
+  `_probe_*` wrappers (each running its own `asyncio.timeout`)
+  collapsed into one `_safe_probe(name, timeout_s, body)` helper that
+  takes a callable, runs it under a bounded timeout, and returns
+  `(name, "ok" | "down")` — backed by a `ProbeStatus` Literal alias
+  for the stringly-typed status. (4) Integration `conftest.py`
+  duplicated `_FakeAgentResult` / `_FakeScrapeAgent` /
+  `_FakeDiscoveryAgent` / `_FakeChain` / `_fake_scrape` from existing
+  unit tests; extracted into `tests/_shared/fakes.py` with a public
+  surface (`FakeAgentResult`, `FakeScrapeAgent`, `FakeDiscoveryAgent`,
+  `FakeChain`, `make_http_scrape_stub`) and the integration suite
+  imports from there. The pre-existing per-file copies in
+  `test_run_mission_route.py` and `test_description_runner.py` are
+  out of scope for this spec; migrating them is a clean follow-up.
+  Comment cleanup: ruthless WHAT-comment trim across `app/main.py`,
+  `app/runner.py`, `app/logging.py`, `apps/api/Dockerfile`, and
+  `apps/web/playwright.config.ts` — kept WHY (constraints, hidden
+  invariants), removed narration. **Verification gate**: `turbo run
+  lint` exits 0;
+  `turbo run typecheck` exits 0; `turbo run test` exits 0 (web 126/126,
+  api 86 passed + 69 skipped including 3 new DB-gated integration
+  tests); structlog config emits canonical JSON
+  (`{"event":..., "level":..., "timestamp":..., "mission_id":...,
+  "task_id":...}`); `/health` returns 200; `/health/ready` returns
+  503 with per-component `checks` body when DB is down (postgres:
+  "down", blob: "ok", clerk: "ok"). Named-agent gates:
+  `scrape-pipeline-doctor` zero invariant violations,
+  `sse-streaming-reviewer` zero issues, `fsd-architect` zero layer
+  violations.
+
 ## In Progress
 
-- `specs/10-taskgroup-runner.md` — to begin next session. Closes
-  Spec 08's invariant-3 deviation (`_spawn_detached` →
-  `TaskGroup.create_task`) and adds per-mission HTTP/browser
-  semaphores (HTTP 20, browser 3) on top of Spec 09's global
-  ceilings.
-
-## Next Up
-
-- Implement `specs/10-taskgroup-runner.md`. The remaining specs
-  follow in numbered order; each spec's `Done when` checklist
-  gates progress to the next.
+- None. All 15 specs landed; the implementation phase is complete.
 
 ## Open Questions
 
-1. **Mission cancellation semantics.** Working assumption: pending
-   tasks cancel, in-flight tasks finish (least surprising). Document
-   and confirm in `specs/14-cost-and-mission-lifecycle.md`.
+1. **Mission cancellation semantics — RESOLVED in Spec 10.**
+   `MissionRunner.request_cancellation()` sets an `asyncio.Event`;
+   tasks not yet started observe at entry and settle as `CANCELLED`;
+   in-flight tasks finish naturally; `CancelledError` (when Spec 14
+   plumbs `task.cancel()`) emits a `task_end:cancelled` then
+   re-raises. The user-facing `DELETE /missions/{id}` endpoint plus
+   the cost-cap reaper are deferred to
+   `specs/14-cost-and-mission-lifecycle.md`.
 2. **Tavily vs Exa for discovery.** Tavily is the user-confirmed
    primary; the 2026 audit favors Exa for embeddings-first agent
    search. Both have free tiers. Revisit after
@@ -452,20 +994,17 @@ resuming a session.
    per deployment, not per user. Cross-user reuse is faster but
    leaks information about scraping patterns. Revisit at scale or
    if a B2B customer requests isolation.
-6. **`SelectorRepository.upsert` SELECT-then-INSERT race.** Two
-   concurrent calls on the same `(domain, purpose)` can both miss
-   the SELECT and both attempt INSERT, hitting the unique index.
-   Spec 13 (adaptive selectors) replaces with `INSERT ... ON CONFLICT
-   DO UPDATE` to close the window. No-op until then because Spec 05
-   ships zero concurrent selector writers.
-7. **Spec 10 must close `runner._spawn_detached` invariant-3
-   deviation.** `apps/api/app/runner.py::_spawn_detached` uses
-   `asyncio.create_task` outside a TaskGroup with a `# TODO(spec-10)`
-   marker. The detached task is held alive by `_inflight_tasks` set
-   + `add_done_callback(discard)` to avoid GC, but ownership is not
-   structured. Spec 10 replaces with `TaskGroup.create_task` and
-   call sites stay unchanged. The `scrape-pipeline-doctor` review of
-   Spec 10 fails until this lands.
+6. **`SelectorRepository.upsert` SELECT-then-INSERT race — RESOLVED
+   in Spec 13.** `upsert` now compiles to `INSERT … ON CONFLICT
+   (domain, purpose) DO UPDATE SET payload, failure_count=0,
+   last_used_at` via `sqlalchemy.dialects.postgresql.insert`. Concurrent
+   writers on the same key cannot collide; the unique covering index
+   serializes them at the database level.
+7. **Spec 08 invariant-3 deviation — CLOSED in Spec 10.**
+   `_spawn_detached` and the `_inflight_tasks` set are gone;
+   `MissionRunner` owns one `asyncio.TaskGroup` per mission and the
+   FastAPI lifespan owns the outer group that adopts each runner.
+   `grep -n "asyncio.create_task" apps/api/app/runner.py` is empty.
 8. **Spec 08 verification deferred to human reviewer.** Two
    verification items in `specs/08-web-shell-and-stream-consumer.md`
    require a real Clerk dev instance + browser run and are not
@@ -1034,3 +1573,275 @@ RLS policy migration and verify cross-tenant isolation test."
   Vitest 30 passed (5 test files including the new
   `widgets/task-lane-card/result-preview.test.tsx` with 9 cases).
   Next: Spec 10.
+- 2026-05-06: Spec 10 shipped on
+  `feature/spec-10-concurrent-task-execution`. Five things worth
+  recording: (1) **Heartbeat deviation from Section E.** `sse.py:120-122`
+  already emits `b": heartbeat\n\n"` via a per-stream
+  `asyncio.wait_for(timeout=15)` — restructuring it into a per-mission
+  asyncio task that pushes pre-formatted bytes through the queue
+  (with the queue-type churn from `tuple[seq,payload]|None` to
+  `bytes|None`) was rejected as needless churn after the user
+  greenlit the simpler path. The intent ("heartbeats every 15s so
+  proxies don't kill idle SSE streams") is met; `test_sse_heartbeat.py`
+  monkeypatches the interval down to 0.05s and proves it. (2) **Legacy
+  `GET /run-mission?url=...` retired** (user-greenlit). The two existing
+  tests (`test_run_mission_route.py`, `test_runner_error_propagation.py`)
+  migrated to `POST /missions` + `GET /run-mission/{id}/stream`; the
+  ring buffer covers the race between POST returning and the stream
+  attaching. Both tests gained a `_FakeChain` so they no longer
+  depend on `OPENROUTER_API_KEY`/`GROQ_API_KEY`. (3) **`_RunnableMission`
+  Protocol** breaks the runner→sse→runner import cycle: the emitter
+  needs only `runner.run() -> Awaitable[None]`, so a structural type
+  with that one method lets `adopt_runner` accept a `MissionRunner`
+  without importing it. Spec's literal pseudocode (`async def
+  adopt(self, mission_id, runner: "MissionRunner")` with private
+  `_tg` mutation from the lifespan) replaced with a clean
+  `bind_lifespan_tg(tg)` method + `_shielded_run` wrapper so an
+  unhandled mission error logs and continues instead of poisoning
+  the lifespan TaskGroup. (4) **Observability tweak**:
+  `start_mission_trace`'s `task_id` parameter became optional —
+  multi-task missions don't carry one task_id at the trace level
+  (per-task spans inherit the trace; `@observe`-decorated tools
+  carry their own `task_id` through `MissionDeps`). (5) **`getByLabelText`
+  in the slide-over test** found two matches because the
+  `<SheetTitle>` ("New multi-URL mission") and the textarea's
+  `aria-label="New multi-URL mission"` both expose the same
+  accessible name; switched to `getByRole("textbox")` which is
+  unique. **Verification gate**: `turbo run lint typecheck test
+  build` exits 0; pytest 70 passed / 19 skipped; Vitest 39 passed
+  across 6 test files; `grep -n "asyncio.create_task"
+  apps/api/app/runner.py` is empty; `grep -rn "TODO(spec-10)" apps
+  packages` is empty. Open Questions 1 and 7 closed in this commit.
+  Next: Spec 11.
+- 2026-05-06: Spec 11 shipped on
+  `feature/spec-11-multi-lane-web-ui`. Six things worth recording:
+  (1) **Timestamp drift bug in spec pseudocode.** Section C of
+  `specs/11-multi-lane-web-ui.md` stamps `lane.startedAt = Date.now()`
+  and `lane.lastTokenAt = Date.now()` inside the projection — but the
+  projection is a `useMemo` that rebuilds from scratch on every events
+  change. A fresh `Date.now()` inside the loop shifts these forward
+  on every event, breaking the 5s-idle reasoning collapse and the
+  elapsed clock. Fix: per-task timestamps live in a sibling
+  `useRef<Map<taskId, { startedAt; tokenCount; lastTokenAt;
+  finishedAt? }>>` outside the memo; `startedAt` stamps once,
+  `lastTokenAt` advances only when the per-task token count grows
+  past the recorded count, `finishedAt` stamps on the first terminal
+  event for that task. (2) **`MissionDetailSlideover` is renderBody-
+  composition, not a direct importer.** Spec §N showed the slide-over
+  importing `TaskLaneStack` directly — that crosses the FSD widget-
+  to-widget boundary. Real fix: edit
+  `apps/web/app/(app)/missions/page.tsx` (the page is allowed to
+  compose widgets); the slide-over file is untouched. (3)
+  **Tailwind tokens in the spec don't match `globals.css`.** Spec
+  used `bg-accent-primary` and `bg-text-muted`; project tokens are
+  `bg-primary` and `bg-muted-foreground`. Substituted throughout.
+  (4) **`InlineErrorChip` didn't exist as its own file.** Spec §J
+  treated it as a Spec 09 carry-over but the chip was inlined in
+  `result-preview.tsx`. Extracted into
+  `widgets/task-lane-stack/inline-error-chip.tsx` with a clean
+  `{ code, message, detectedProtections? }` prop bag — avoids
+  callers having to construct synthetic `SseError` objects. (5)
+  **Biome lint nits.** Internal helper named `_useMissionAnnouncements`
+  triggered `useHookAtTopLevel` (Biome required the canonical `use…`
+  prefix without the underscore); `aria-relevant` on a role-less div
+  triggered `useAriaPropsSupportedByRole` — both fixed by renaming and
+  by adding `role="status"` to the announcement region. The
+  `…thinking` span's `aria-label` switched to `title` since
+  `aria-label` on a span trips the same rule. (6) **Lane-terminal
+  vs mission-complete announcement collision.** Both run in the
+  same effect cycle and a polite live region overwrites; the
+  per-lane terminal announcement disappears at the moment the
+  mission completes. Acceptable for now: the mission-complete text
+  is the right thing for the user to hear at the end. The
+  per-lane announcement stays observable when the mission has more
+  than one lane and at least one is still running. **Verification
+  gate**: `turbo run typecheck` exits 0; `turbo run lint` exits 0;
+  `turbo run build` exits 0; web Vitest 84 passed across 14 test
+  files; `git ls-files apps/web/widgets/task-lane-card` returns
+  empty. Next: Spec 12.
+- 2026-05-06: Spec 12 shipped on
+  `feature/spec-12-url-discovery-tavily`. Eleven deviations from
+  the spec text, each documented at the implementation site:
+  (1) **Skipped `uv add tavily-python`.** Spec section A says to
+  add the SDK but section C uses raw `httpx` and never imports
+  `tavily-python`. Adding an unused dep would fail simplify review.
+  (2) **Kept `build_agent` name** instead of renaming to
+  `build_scrape_agent` — the spec hedged in a parenthetical and the
+  rename would touch 7 callsites including 4 tests for cosmetic gain.
+  (3) **Renamed both `ApprovalRequest` collisions** to
+  `_PendingApproval` (runner) and `ApproveMissionRequest` (route);
+  the spec declared two same-named classes in modules that import
+  each other. (4) **`submit_approval` returns
+  `Literal["accepted", "no_pending"]`** so `/approve` can return 503
+  on post-restart orphan instead of silently 204'ing — the spec's
+  silent path lies to the client. (5) **30-min approval timeout is
+  threaded as a kwarg** through `start_description_mission` and
+  `run_description_mission` (default `1800.0`); tests pass `0.05`
+  rather than monkeypatching a module constant. (6) **`set_phase`
+  for URL-mode** — `start_url_mission` writes `SCRAPING` before
+  adopting the runner; `MissionRunner.run` writes `DONE` after the
+  rolled-up `done` emit. The spec text said URL-mode missions carry
+  `phase=scraping` but never showed the diff. (7) **Defense-in-depth
+  SSRF inside `discover_urls`** — every Tavily-supplied URL goes
+  through `assert_safe_url` before it becomes a `url_discovered`
+  event or lands in `discovered_urls` jsonb; unsafe URLs are
+  silently dropped, and an all-unsafe response collapses to
+  `DiscoveryFailure(reason="no_results")`. (8) **`run_description_mission`
+  has a top-level `try/except/finally` with a
+  `terminal_emitted: bool` flag** so any programming error still
+  emits a mission-level terminal `done`/`error` (invariant 5 at the
+  mission level beyond the inner runner's per-task guarantees).
+  (9) **`DescriptionMissionRunner` adapter dataclass** wraps the
+  coroutine so `adopt_runner` (which expects `_RunnableMission.run()`)
+  accepts it without Protocol relaxation. (10) **Snake-case
+  `mission_id` response shape** in `submitDescription`, not the
+  `missionId` shown in spec section K — matches the existing BFF
+  contract (`submitMany` reads `mission_id`). (11) **Added missing
+  `--state-warn` token** to `globals.css` (light `#9e8c3a` / dark
+  `#d4b856` per `ui-context.md`) plus the `--color-state-warn:
+  var(--state-warn)` Tailwind bridge — without these, `bg-state-warn`
+  in the score pill wouldn't compile. **Engineering details worth
+  recording**: (a) The `_discovery_called` ContextVar uses
+  `frozenset[UUID]` with set-union (never `.add()`) so the per-task
+  context inheritance stays copy-on-write — concurrent missions
+  observe independent caps. (b) Round-trip tests in both languages
+  ship before the runner code that emits `discovery_complete`,
+  because the pydantic v2 RootModel rejects unknown discriminator
+  values; schema-first ordering is mandatory. (c) The new
+  `mission_phase` enum is created via `postgresql.ENUM(...).create()`
+  + `create_type=False` on the column add, mirroring how alembic
+  expects enum types referenced from `op.add_column`. (d) The web
+  app's `entities/mission/types.ts` had `MissionMode = "url" |
+  "description"` already (Spec 05 typed-but-unimplemented); Spec 12
+  finally exercises both arms. (e) `useApprovalState`'s
+  `toggleAll` fills the selection from a partial seed and only
+  empties on the next press — matches the spec's "selectAll →
+  deselectAll" label transition driven by `selectedCount ===
+  totalCount`. (f) Vitest's accessible-name match against the
+  Approve button required matching the prefix only (`/^Approve 1
+  URL/`) because the trailing `Kbd` ("⌘↩") joins the accessible
+  name. (g) `next typegen` is required after adding a route file
+  for `tsc --noEmit` to recognize the new `RouteContext` literal —
+  Next 16 doesn't auto-watch under bare typecheck. **Verification
+  gate**: `turbo run lint` exits 0; `turbo run typecheck` exits 0
+  (mypy strict + tsc strict, with the generated `SseEvent`
+  discriminated union narrowing on `discovery_complete`); `turbo
+  run test` exits 0 (api 86 passed / 30 skipped, web 109 passed
+  across 17 files, sse-protocol 10 passed); `turbo run build`
+  exits 0 with `/api/missions/[id]/approve` registered.
+  Open Question 2 (Tavily vs Exa) stays open per the spec's
+  Done-when checklist — revisit after real-world quality data.
+  Next: Spec 13.
+- 2026-05-06: Spec 13 shipped on
+  `feature/spec-13-adaptive-selectors`. **Architectural pivot from the
+  spec text**: spec assumed Scrapling 0.3+ but Open Question 11 pins
+  us to 0.2.99 (lxml 5.x conflict with crawl4ai 0.8.6). Three
+  consequences: (a) `.css()` kwarg is `auto_match` not `adaptive`;
+  (b) storage backend wired via `BaseFetcher.custom_config` at fetch
+  time, not the spec's post-fetch `page._storage = ...` monkey-patch
+  — Scrapling 0.2.99's `parser.py:114-118` hard-requires the storage
+  class be `lru_cache`-decorated and instantiated by `Adaptor.__init__`,
+  so we ship `ProcessLruStorage` as a class, threaded via
+  `custom_config={"auto_match": True, "storage": ProcessLruStorage,
+  "storage_args": {"url": args.url}}`; (c) Scrapling's sync `save()`
+  callback writes the LRU only — the DB upsert is an explicit `await`
+  in `select_main_content` after `.css()` returns, so we never
+  schedule a detached `loop.create_task(...)` from inside Scrapling
+  (invariant 3 holds). **Other corrections**: spec's
+  `extractor.extract(html=main_html.encode("utf-8"))` is wrong —
+  `MarkdownExtractor.extract` takes `str`, so we pass scoped HTML
+  directly; existing `SelectorRepository.upsert` had been bumping
+  `hit_count` on collision, but the spec moves that to a separate
+  `bump_hit_count` so the refactored `upsert` no longer touches
+  `hit_count`. **Files**: 7 new (`selector_cache.py`, `_purposes.py`,
+  `_storage.py`, `_select.py`, `jobs/__init__.py`,
+  `jobs/selector_sweep.py`, migration 0003), 2 new web
+  (`selector-recovery-chip.tsx` + test), 4 new pytest cases in
+  `test_selector_repository.py`, 4 in `test_select_main_content.py`,
+  1 in `use-task-lanes.test.ts`. **Edits**: `models.py`
+  (`failure_count`), `repository.py` (rename `get` → `find`, refactor
+  `upsert` to `INSERT ... ON CONFLICT DO UPDATE` via
+  `sqlalchemy.dialects.postgresql.insert`, four new methods using
+  `sqlmodel.col()` to wrap column refs for mypy strict),
+  `http.py`/`stealth.py`/`dynamic.py` (custom_config + helper call),
+  `main.py` (sweep task on lifespan TG), `pyproject.toml`
+  (cachetools 7.1 + lxml mypy override), `use-task-lanes.ts`
+  (`selectorRecoveryCount` field + projection case),
+  `task-lane-row.tsx` (chip render), `en.ts` (4 keys). **Selector
+  shape across cache + repo**: chose a row-shaped dict
+  (`{id, payload, hit_count, failure_count, last_used_at}`) so
+  `find()` can reconstruct a transient `SavedSelector` from cache
+  and `ProcessLruStorage.retrieve()` can pluck just `payload` —
+  same `(domain, purpose)` key, two consumers. **Tests**: DB-gated
+  pytest tests follow the existing `pytest.skipif(database_url is
+  None)` convention used by `test_repository.py`; they run against
+  Neon dev branches in environments where `DATABASE_URL` is set.
+  **Verification gate**: `turbo run lint` exits 0; `turbo run
+  typecheck` exits 0; `turbo run test` exits 0 (web 113 passed /
+  18 files, api 86 passed / 42 skipped, sse-protocol cached);
+  `turbo run build` exits 0. Open Question 6 closed; Open Question
+  5 (cross-tenant selector visibility) stays open per the spec's
+  out-of-scope list — revisit at scale. Open Question 11 stays
+  open as a longer-term hygiene item (Scrapling 0.3 + lxml 6 +
+  alternative markdown pipeline). Next: Spec 14.
+- 2026-05-08: Slide-over → master-detail refactor on
+  `fix/master-detail-mission-view`. User feedback was that closing
+  the slide-over wiped every piece of mission state (elapsed
+  counter, lane focus, reasoning toggle), the wasted middle pane
+  served no purpose, and the LLM-generated summary never reached
+  the UI. Six things worth recording: (1) **Route is the source of
+  truth**: `/missions/[id]` (Next 16 dynamic segment with `params:
+  Promise<{id: string}>` server-component awaited) replaces the
+  Zustand `openMissionId` store key; navigation now survives F5,
+  back/forward, and direct link sharing. The store's
+  `openMission`/`closeMission`/`openMissionId` keys are gone; the
+  remaining slide-overs (multi-URL composer, description-mode
+  composer) keep their own keys. (2) **Two-column dense layout**:
+  `<MissionView>` renders a fixed-height (h-11) hero band along the
+  top + a `lg:grid-cols-[minmax(0,1fr)_320px]` body where the left
+  column owns the live transcript (phase-aware: discovery /
+  approval / lanes) and the right column owns `<MissionAside>` —
+  three stacked cards (Overview / Summary / Tasks). Below `lg` the
+  aside stacks above the lanes for tablet / phone. (3) **Summary
+  persistence**: added `tasks.summary text` via alembic migration
+  `b6ed8ae2862b`; runner persists `mission_result.summary` on the
+  terminal task update; `_TaskResponse` exposes it; `MissionAside`
+  reads `tasks[].summary` and renders one paragraph per successful
+  task — answering the user's "what was scraped" question without
+  re-walking the message history. (4) **Elapsed counter survives
+  navigation**: derived from `mission.created_at` /
+  `mission.finished_at` (Postgres) not from SSE event timestamps.
+  `useElapsedSeconds` re-renders once a second while the mission
+  is running; for terminal missions the value is computed once and
+  frozen. The previous slide-over read elapsed from event arrival
+  times so reopening a finished mission read "00:00 elapsed". (5)
+  **Welcome state replaces the wasted middle pane**: `<WelcomeState>`
+  renders when the user has missions but none is selected —
+  keyboard-shortcut hint cards + recent-missions list (uses
+  existing `useRecentMissions`, three rows, terminal only). The
+  empty state for first-time users remains untouched. (6)
+  **`<CancelMissionButton>` accepts a `missionId` prop** instead
+  of pulling from the store, so the route-based hero can compose
+  it with the active mission's id. **Files**: 6 new (migration,
+  `mission-view/index.tsx`, `mission-view/mission-hero.tsx`,
+  `mission-view/mission-aside.tsx`,
+  `app/(app)/missions/[id]/page.tsx`,
+  `app/(app)/missions/welcome-state.tsx`); 2 deleted
+  (`widgets/mission-detail/index.tsx`,
+  `app/(app)/missions/slide-over-content.tsx`); edits to
+  `models.py` / `repository.py` / `routes.py` / `runner.py` (api),
+  `entities/mission/types.ts` / `features/run-mission/store.ts` /
+  `cancel-mission-button.{tsx,test.tsx}` /
+  `use-submit-mission.{ts,test.tsx}` /
+  `widgets/command-palette/index.tsx` /
+  `widgets/mission-sidebar/mission-row.tsx` /
+  `widgets/multi-url-slideover/multi-url-slideover.test.tsx` /
+  `app/(app)/missions/page.tsx` / `shared/i18n/keys/en.ts` /
+  `vitest.setup.mts` (default `next/navigation` mock). **i18n keys
+  added**: `missionDetailFetchFailed`, `elapsedAria`, `costFree`,
+  `aside{Overview,Mode,Status,Cost,Tasks,Failed,Cancelled,
+  Started,Finished,Summary,SummaryEmpty,TaskList}`,
+  `welcome{Title,Subtitle,NewHint,MultiHint,DescriptionHint}`.
+  **Verification gate**: `pnpm typecheck` exits 0; `pnpm vitest
+  run` 126 passed across 21 files; `pnpm build` exits 0 with
+  `/missions/[id]` registered as `ƒ` dynamic.

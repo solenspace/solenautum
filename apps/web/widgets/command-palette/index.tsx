@@ -1,10 +1,12 @@
 "use client";
 
 import { useClerk } from "@clerk/nextjs";
-import { Eye, Globe2, LogOut, PanelLeft } from "lucide-react";
+import { Eye, Globe2, ListPlus, LogOut, PanelLeft, Search } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { useState } from "react";
 
 import {
+  Command,
   CommandDialog,
   CommandEmpty,
   CommandGroup,
@@ -13,9 +15,11 @@ import {
   CommandList,
   CommandShortcut,
 } from "@/components/ui/command";
+import { useSidebar } from "@/components/ui/sidebar";
 import { useMissionStore, useRecentMissions } from "@/features/run-mission";
 import { useT } from "@/shared/i18n";
 import { useShortcut } from "@/shared/keyboard";
+import { useTheme } from "@/shared/theme";
 
 /**
  * Command palette — Cmd+K opens a single-input search-or-command surface
@@ -29,10 +33,20 @@ export function CommandPalette() {
   const t = useT();
   const [open, setOpen] = useState(false);
   const recent = useRecentMissions();
-  const openMission = useMissionStore((s) => s.openMission);
+  const router = useRouter();
+  const openMultiUrl = useMissionStore((s) => s.openMultiUrl);
+  const openDescription = useMissionStore((s) => s.openDescription);
   const { signOut } = useClerk();
+  const { toggleSidebar } = useSidebar();
+  const { toggle: toggleTheme } = useTheme();
 
   useShortcut(["cmd+k", "ctrl+k"], () => setOpen((value) => !value), { allowInInput: true });
+  useShortcut(["cmd+shift+n", "ctrl+shift+n"], () => openMultiUrl(), {
+    allowInInput: true,
+  });
+  useShortcut(["cmd+shift+d", "ctrl+shift+d"], () => openDescription(), {
+    allowInInput: true,
+  });
 
   function _focusUrlInput(): void {
     // The top-bar input is the only `type="url"` field in the shell.
@@ -42,62 +56,106 @@ export function CommandPalette() {
 
   return (
     <CommandDialog open={open} onOpenChange={setOpen}>
-      <CommandInput placeholder={t("common", "searchOrCommand")} />
-      <CommandList>
-        <CommandEmpty>{t("common", "nothingFound")}</CommandEmpty>
+      {/* The shadcn `CommandDialog` primitive renders `{children}` directly
+          inside `DialogContent` without the `<Command>` provider that
+          cmdk's `useCommandState` requires. Without this wrapper, every
+          `CommandInput`/`CommandList`/`CommandItem` inside crashes with
+          `Cannot read properties of undefined (reading 'subscribe')`.
+          The primitive is a protected file (`components/ui/*`) so we
+          provide the missing root here at the widget layer. */}
+      <Command>
+        <CommandInput placeholder={t("common", "searchOrCommand")} />
+        <CommandList>
+          <CommandEmpty>{t("common", "nothingFound")}</CommandEmpty>
 
-        {recent.length > 0 ? (
-          <CommandGroup heading={t("common", "recent")}>
-            {recent.map((mission) => (
-              <CommandItem
-                key={mission.id}
-                onSelect={() => {
-                  openMission(mission.id);
-                  setOpen(false);
-                }}
-              >
-                <Globe2 className="h-3.5 w-3.5" />
-                <span className="truncate font-mono text-[13px]">{mission.prompt}</span>
-              </CommandItem>
-            ))}
+          {recent.length > 0 ? (
+            <CommandGroup heading={t("common", "recent")}>
+              {recent.map((mission) => (
+                <CommandItem
+                  key={mission.id}
+                  onSelect={() => {
+                    router.push(`/missions/${mission.id}`);
+                    setOpen(false);
+                  }}
+                >
+                  <Globe2 className="h-3.5 w-3.5" />
+                  <span className="truncate font-mono text-[13px]">{mission.prompt}</span>
+                </CommandItem>
+              ))}
+            </CommandGroup>
+          ) : null}
+
+          <CommandGroup heading={t("common", "actions")}>
+            <CommandItem
+              onSelect={() => {
+                setOpen(false);
+                _focusUrlInput();
+              }}
+            >
+              <Globe2 className="h-3.5 w-3.5" />
+              {t("mission", "newMission")}
+              <CommandShortcut>⌘N</CommandShortcut>
+            </CommandItem>
+            <CommandItem
+              onSelect={() => {
+                setOpen(false);
+                openMultiUrl();
+              }}
+            >
+              <ListPlus className="h-3.5 w-3.5" />
+              {t("mission", "newMultiUrlMission")}
+              <CommandShortcut>⌘⇧N</CommandShortcut>
+            </CommandItem>
+            <CommandItem
+              onSelect={() => {
+                setOpen(false);
+                openDescription();
+              }}
+            >
+              <Search className="h-3.5 w-3.5" />
+              {t("mission", "newDescriptionMission")}
+              <CommandShortcut>⌘⇧D</CommandShortcut>
+            </CommandItem>
+            <CommandItem onSelect={() => setOpen(false)}>
+              <Eye className="h-3.5 w-3.5" />
+              {t("mission", "toggleReasoning")}
+              <CommandShortcut>⌘.</CommandShortcut>
+            </CommandItem>
+            <CommandItem
+              onSelect={() => {
+                setOpen(false);
+                toggleSidebar();
+              }}
+            >
+              <PanelLeft className="h-3.5 w-3.5" />
+              {t("common", "toggleSidebar")}
+              <CommandShortcut>⌘B</CommandShortcut>
+            </CommandItem>
+            <CommandItem
+              onSelect={() => {
+                setOpen(false);
+                toggleTheme();
+              }}
+            >
+              <PanelLeft className="h-3.5 w-3.5" />
+              {t("common", "toggleTheme")}
+              <CommandShortcut>⌘⇧L</CommandShortcut>
+            </CommandItem>
           </CommandGroup>
-        ) : null}
 
-        <CommandGroup heading={t("common", "actions")}>
-          <CommandItem
-            onSelect={() => {
-              setOpen(false);
-              _focusUrlInput();
-            }}
-          >
-            <Globe2 className="h-3.5 w-3.5" />
-            {t("mission", "newMission")}
-            <CommandShortcut>⌘N</CommandShortcut>
-          </CommandItem>
-          <CommandItem onSelect={() => setOpen(false)}>
-            <Eye className="h-3.5 w-3.5" />
-            {t("mission", "toggleReasoning")}
-            <CommandShortcut>⌘.</CommandShortcut>
-          </CommandItem>
-          <CommandItem onSelect={() => setOpen(false)}>
-            <PanelLeft className="h-3.5 w-3.5" />
-            {t("common", "toggleSidebar")}
-            <CommandShortcut>⌘B</CommandShortcut>
-          </CommandItem>
-        </CommandGroup>
-
-        <CommandGroup heading={t("common", "account")}>
-          <CommandItem
-            onSelect={() => {
-              setOpen(false);
-              void signOut();
-            }}
-          >
-            <LogOut className="h-3.5 w-3.5" />
-            {t("common", "signOut")}
-          </CommandItem>
-        </CommandGroup>
-      </CommandList>
+          <CommandGroup heading={t("common", "account")}>
+            <CommandItem
+              onSelect={() => {
+                setOpen(false);
+                void signOut();
+              }}
+            >
+              <LogOut className="h-3.5 w-3.5" />
+              {t("common", "signOut")}
+            </CommandItem>
+          </CommandGroup>
+        </CommandList>
+      </Command>
     </CommandDialog>
   );
 }

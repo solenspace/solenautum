@@ -3,6 +3,7 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { I18nProvider } from "@/shared/i18n";
+import { THEME_HYDRATION_SCRIPT, ThemeProvider } from "@/shared/theme";
 
 import "./globals.css";
 
@@ -28,11 +29,26 @@ export default function RootLayout({
 }>) {
   return (
     <ClerkProvider>
-      <html lang="en" className={`${geistSans.variable} ${geistMono.variable}`}>
+      <html
+        lang="en"
+        className={`${geistSans.variable} ${geistMono.variable}`}
+        suppressHydrationWarning
+      >
+        <head>
+          {/* Apply the persisted theme class on `<html>` before React
+              hydrates so a dark-mode user does not see a light flash.
+              The script body is a constant string we control (see
+              `THEME_HYDRATION_SCRIPT` in `shared/theme/index.tsx`); no
+              user input flows through this path. */}
+          {/* biome-ignore lint/security/noDangerouslySetInnerHtml: known-safe constant script for theme hydration */}
+          <script dangerouslySetInnerHTML={{ __html: THEME_HYDRATION_SCRIPT }} />
+        </head>
         <body>
-          <I18nProvider>
-            <TooltipProvider>{children}</TooltipProvider>
-          </I18nProvider>
+          <ThemeProvider>
+            <I18nProvider>
+              <TooltipProvider>{children}</TooltipProvider>
+            </I18nProvider>
+          </ThemeProvider>
         </body>
       </html>
     </ClerkProvider>

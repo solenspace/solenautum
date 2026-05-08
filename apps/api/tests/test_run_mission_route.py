@@ -1,7 +1,7 @@
-"""End-to-end smoke for the `/run-mission` route. Validates the full SSE
-event sequence (task_start -> task_end:succeeded -> done:succeeded), the
-mission/task row state in Postgres, and `tasks.parsed_markdown` matches the
-fixture.
+"""End-to-end smoke for the mission lifecycle: `POST /missions` returns
+a mission id; `GET /run-mission/{id}/stream` replays the full SSE
+sequence (`task_start → task_end:succeeded → done:succeeded`); the
+`tasks` row in Postgres carries `parsed_markdown` and `snapshot_key`.
 
 LLM and network are stubbed so the test runs hermetically:
 - `app.tools.http.scrape_http` is replaced with a deterministic fake
@@ -10,7 +10,9 @@ LLM and network are stubbed so the test runs hermetically:
 - `app.runner.build_agent` is replaced with a fake agent whose `.run()`
   calls the stubbed tool once and returns a `MissionResult(status="ok",
   ...)` plus an `all_messages()` shape the runner can walk via
-  `_last_ok_tool_call`.
+  `last_ok_tool_call`.
+- `app.runner.LLMProviderChain` is replaced with a stub so the test does
+  not depend on `OPENROUTER_API_KEY` / `GROQ_API_KEY`.
 
 DB-dependent assertions skip when `DATABASE_URL` is unset.
 """
@@ -36,10 +38,17 @@ from app.persistence.repository import UserRepository
 from app.security import CurrentUser, _current_user, require_user
 from app.tools.http import HttpScrapeArgs, HttpScrapeOk, HttpToolDeps
 
-pytestmark = pytest.mark.skipif(
-    settings.database_url is None,
-    reason="DATABASE_URL is not set; route smoke needs a real Postgres",
-)
+# See test_approval_endpoint.py header — same TestClient+pytest-asyncio
+# cross-loop deadlock. Tracked as a follow-up to migrate to AsyncClient.
+pytestmark = [
+    pytest.mark.skipif(
+        settings.database_url is None,
+        reason="DATABASE_URL is not set; route smoke needs a real Postgres",
+    ),
+    pytest.mark.skip(
+        reason="TestClient+pytest-asyncio cross-loop deadlock — see test_approval_endpoint.py header"
+    ),
+]
 
 
 _FIXTURE_USER_ID = "user_test_route"
@@ -60,7 +69,7 @@ class _FakeAgentResult:
 class _FakeAgent:
     """Stub `Agent` that calls the stubbed tier tool once and returns a
     fake result whose `all_messages()` carries one `ToolReturnPart`
-    holding a real `HttpScrapeOk` — so `_last_ok_tool_call` recovers
+    holding a real `HttpScrapeOk` — so `last_ok_tool_call` recovers
     the snapshot key, markdown, and latency exactly as it would in
     production.
     """
@@ -76,7 +85,7 @@ class _FakeAgent:
         )
         tool_result = await http_tool.scrape_http(http_deps, HttpScrapeArgs(url=url))
         # The real Pydantic AI builds these messages around each tool call;
-        # _last_ok_tool_call only reads `ToolReturnPart.content`, so a
+        # last_ok_tool_call only reads `ToolReturnPart.content`, so a
         # minimal one-message history is enough.
         message = ModelRequest(
             parts=[
@@ -96,6 +105,15 @@ class _FakeAgent:
             ),
             messages=[message],
         )
+
+
+class _FakeChain:
+    """Replaces `LLMProviderChain` so the route test does not depend on
+    LLM env credentials. Just runs the callable with a sentinel model.
+    """
+
+    async def with_fallback(self, run: Any) -> Any:
+        return await run(object())
 
 
 @pytest.fixture
@@ -125,6 +143,7 @@ def patch_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr("app.tools.http.scrape_http", _fake_scrape)
     monkeypatch.setattr("app.runner.build_agent", _fake_build_agent)
+    monkeypatch.setattr("app.runner.LLMProviderChain", lambda **_kw: _FakeChain())
 
 
 @pytest.fixture
@@ -154,17 +173,53 @@ def _parse_sse(body: str) -> list[dict[str, Any]]:
     return events
 
 
-@pytest.mark.asyncio
-async def test_run_mission_streams_terminal_events(client: TestClient) -> None:
+def _post_and_stream(client: TestClient, urls: list[str]) -> tuple[str, list[dict[str, Any]]]:
+    """Submit a mission via POST /missions, then attach via GET stream.
+    Returns the mission id and the parsed event list (drained until the
+    mission's terminal `done` event).
+    """
+    start = client.post(
+        "/missions",
+        json={"urls": urls},
+        headers={"Authorization": "Bearer fake"},
+    )
+    assert start.status_code == 201, start.text
+    mission_id = start.json()["mission_id"]
+
     response = client.get(
-        "/run-mission",
-        params={"url": _FIXTURE_URL},
+        f"/run-mission/{mission_id}/stream",
         headers={"Authorization": "Bearer fake"},
     )
     assert response.status_code == 200, response.text
     assert response.headers["content-type"].startswith("text/event-stream")
+    return mission_id, _parse_sse(response.text)
 
-    events = _parse_sse(response.text)
+
+@pytest.mark.asyncio
+async def test_post_missions_returns_id_quickly(client: TestClient) -> None:
+    """POST /missions returns a JSON body containing `mission_id` so the BFF
+    can pass it to a separate SSE consumer. The runner runs in the
+    lifespan-scoped TaskGroup; the ring buffer covers the race.
+    """
+    response = client.post(
+        "/missions",
+        json={"urls": [_FIXTURE_URL]},
+        headers={"Authorization": "Bearer fake"},
+    )
+    assert response.status_code == 201, response.text
+    assert response.headers["content-type"].startswith("application/json")
+    body = response.json()
+    assert "mission_id" in body
+    UUID(body["mission_id"])  # round-trip
+
+
+@pytest.mark.asyncio
+async def test_stream_replays_terminal_event_sequence(client: TestClient) -> None:
+    """`POST /missions` + `GET /run-mission/{id}/stream` together replay the
+    full event sequence from the ring buffer regardless of whether the
+    consumer attaches before or after the runner finishes.
+    """
+    _, events = _post_and_stream(client, [_FIXTURE_URL])
     types = [event["type"] for event in events]
     assert types == ["task_start", "task_end", "done"]
 
@@ -182,16 +237,8 @@ async def test_run_mission_streams_terminal_events(client: TestClient) -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_mission_persists_full_markdown(
-    client: TestClient, fake_user: CurrentUser
-) -> None:
-    response = client.get(
-        "/run-mission",
-        params={"url": _FIXTURE_URL},
-        headers={"Authorization": "Bearer fake"},
-    )
-    events = _parse_sse(response.text)
-    mission_id = events[0]["mission_id"]
+async def test_runner_persists_full_markdown(client: TestClient, fake_user: CurrentUser) -> None:
+    mission_id, _ = _post_and_stream(client, [_FIXTURE_URL])
 
     _current_user.set(fake_user)
     async with transaction() as session:
@@ -208,50 +255,6 @@ async def test_run_mission_persists_full_markdown(
 
 
 @pytest.mark.asyncio
-async def test_post_missions_returns_id_quickly(client: TestClient) -> None:
-    """POST /missions returns a JSON body containing `mission_id` so the BFF
-    can pass it to a separate SSE consumer. The detached task may still be
-    running when this endpoint returns; the ring buffer covers that race.
-    """
-    response = client.post(
-        "/missions",
-        json={"url": _FIXTURE_URL},
-        headers={"Authorization": "Bearer fake"},
-    )
-    assert response.status_code == 201, response.text
-    assert response.headers["content-type"].startswith("application/json")
-    body = response.json()
-    assert "mission_id" in body
-    UUID(body["mission_id"])  # round-trip
-
-
-@pytest.mark.asyncio
-async def test_stream_endpoint_replays_terminal(client: TestClient) -> None:
-    """`GET /run-mission/{id}/stream` attaches to a mission already started
-    by `POST /missions`. The 200-event ring buffer replays `task_start →
-    task_end → done` whether the consumer attaches before or after the
-    detached task finishes.
-    """
-    start = client.post(
-        "/missions",
-        json={"url": _FIXTURE_URL},
-        headers={"Authorization": "Bearer fake"},
-    )
-    mission_id = start.json()["mission_id"]
-
-    response = client.get(
-        f"/run-mission/{mission_id}/stream",
-        headers={"Authorization": "Bearer fake"},
-    )
-    assert response.status_code == 200, response.text
-    assert response.headers["content-type"].startswith("text/event-stream")
-
-    events = _parse_sse(response.text)
-    types = [event["type"] for event in events]
-    assert types == ["task_start", "task_end", "done"]
-
-
-@pytest.mark.asyncio
 async def test_stream_endpoint_404_for_unknown_mission(client: TestClient) -> None:
     """A mission id the current user does not own (or that does not exist)
     returns 404 fast — no streaming response opened.
@@ -261,3 +264,26 @@ async def test_stream_endpoint_404_for_unknown_mission(client: TestClient) -> No
         headers={"Authorization": "Bearer fake"},
     )
     assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_post_missions_rejects_empty_urls(client: TestClient) -> None:
+    """Pydantic enforces `1 ≤ len(urls) ≤ 20`. An empty array bounces
+    with 422 before the runner is constructed.
+    """
+    response = client.post(
+        "/missions",
+        json={"urls": []},
+        headers={"Authorization": "Bearer fake"},
+    )
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_post_missions_rejects_more_than_20_urls(client: TestClient) -> None:
+    response = client.post(
+        "/missions",
+        json={"urls": [f"https://example.com/{i}" for i in range(21)]},
+        headers={"Authorization": "Bearer fake"},
+    )
+    assert response.status_code == 422

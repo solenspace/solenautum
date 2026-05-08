@@ -6,7 +6,14 @@ from uuid import UUID
 import pytest
 from pydantic import ValidationError
 
-from autumn_sse_protocol import Done, SseError, SseEvent, TaskEnd, Token
+from autumn_sse_protocol import (
+    DiscoveryComplete,
+    Done,
+    SseError,
+    SseEvent,
+    TaskEnd,
+    Token,
+)
 
 MISSION = UUID("00000000-0000-0000-0000-000000000001")
 TASK = UUID("00000000-0000-0000-0000-000000000002")
@@ -85,6 +92,46 @@ def test_error_round_trip_preserves_code() -> None:
     round_tripped = json.loads(event.model_dump_json())
     assert round_tripped["content"]["code"] == "resume_lost"
     assert round_tripped["content"]["message"] == "buffer evicted"
+
+
+def test_discovery_complete_round_trip() -> None:
+    raw = {
+        "type": "discovery_complete",
+        "content": {"count": 3, "awaiting_approval": True},
+        "mission_id": str(MISSION),
+        "seq": 12,
+    }
+    event = SseEvent.model_validate(raw)
+    assert isinstance(event.root, DiscoveryComplete)
+    round_tripped = json.loads(event.model_dump_json())
+    assert round_tripped["type"] == "discovery_complete"
+    assert round_tripped["content"]["count"] == 3
+    assert round_tripped["content"]["awaiting_approval"] is True
+    assert round_tripped.get("task_id") is None
+
+
+def test_discovery_complete_skip_approval_variant() -> None:
+    raw = {
+        "type": "discovery_complete",
+        "content": {"count": 0, "awaiting_approval": False},
+        "mission_id": str(MISSION),
+        "seq": 1,
+    }
+    event = SseEvent.model_validate(raw)
+    assert isinstance(event.root, DiscoveryComplete)
+    assert event.root.content.awaiting_approval is False
+
+
+def test_discovery_complete_rejects_missing_awaiting_approval() -> None:
+    with pytest.raises(ValidationError):
+        SseEvent.model_validate(
+            {
+                "type": "discovery_complete",
+                "content": {"count": 5},
+                "mission_id": str(MISSION),
+                "seq": 0,
+            }
+        )
 
 
 def test_rejects_negative_seq() -> None:

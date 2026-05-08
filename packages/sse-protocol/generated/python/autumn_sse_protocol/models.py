@@ -89,6 +89,16 @@ class UrlDiscovered(BaseEvent):
 
 
 class Content5(BaseModel):
+    count: conint(ge=0)
+    awaiting_approval: bool
+
+
+class DiscoveryComplete(BaseEvent):
+    type: Literal['discovery_complete']
+    content: Content5
+
+
+class Content6(BaseModel):
     domain: str
     purpose: str
     hit_count: conint(ge=1)
@@ -96,7 +106,7 @@ class Content5(BaseModel):
 
 class SelectorRecovered(BaseEvent):
     type: Literal['selector_recovered']
-    content: Content5
+    content: Content6
 
 
 class MissionStatus(Enum):
@@ -105,17 +115,17 @@ class MissionStatus(Enum):
     cancelled = 'cancelled'
 
 
-class Content6(BaseModel):
+class Content7(BaseModel):
     mission_status: MissionStatus
     cost_cents: conint(ge=0) | None = None
 
 
 class Done(BaseEvent):
     type: Literal['done']
-    content: Content6
+    content: Content7
 
 
-class Content7(BaseModel):
+class Content8(BaseModel):
     code: str = Field(
         ...,
         description='Machine code, e.g. resume_lost, ssrf_blocked, robots_disallowed, site_not_supported',
@@ -125,7 +135,7 @@ class Content7(BaseModel):
 
 class SseError(BaseEvent):
     type: Literal['error']
-    content: Content7
+    content: Content8
 
 
 class SseEvent(
@@ -136,6 +146,7 @@ class SseEvent(
         | TaskStart
         | TaskEnd
         | UrlDiscovered
+        | DiscoveryComplete
         | SelectorRecovered
         | Done
         | SseError
@@ -148,6 +159,7 @@ class SseEvent(
         | TaskStart
         | TaskEnd
         | UrlDiscovered
+        | DiscoveryComplete
         | SelectorRecovered
         | Done
         | SseError

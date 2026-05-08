@@ -87,4 +87,34 @@ describe("SSE event round-trip", () => {
     });
     expect(validate(event)).toBe(true);
   });
+
+  test("discovery_complete event validates without task_id", () => {
+    const event = assertSseEvent({
+      type: "discovery_complete",
+      content: { count: 5, awaiting_approval: true },
+      mission_id: MISSION_ID,
+      seq: 12,
+    });
+    expect(validate(event)).toBe(true);
+  });
+
+  test("discovery_complete with awaiting_approval=false (skip-approval) validates", () => {
+    const event = assertSseEvent({
+      type: "discovery_complete",
+      content: { count: 0, awaiting_approval: false },
+      mission_id: MISSION_ID,
+      seq: 1,
+    });
+    expect(validate(event)).toBe(true);
+  });
+
+  test("rejects discovery_complete missing awaiting_approval", () => {
+    const bad = {
+      type: "discovery_complete",
+      content: { count: 5 },
+      mission_id: MISSION_ID,
+      seq: 0,
+    };
+    expect(validate(bad)).toBe(false);
+  });
 });

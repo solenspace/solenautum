@@ -5,7 +5,7 @@ register against one `Agent[MissionDeps, MissionResult]`. The agent
 chooses escalation based on the `reason` of each tier's typed
 `*Failure`, per the system prompt below. The runner reads
 `mission_result.error_code` and the most recent successful tool result
-(via `runner_helpers._last_ok_tool_call`) to write the SSE error event
+(via `runner_helpers.last_ok_tool_call`) to write the SSE error event
 and the `tasks` row.
 """
 
@@ -14,9 +14,16 @@ from __future__ import annotations
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from pydantic_ai import Agent, RunContext
 
+from app.search import DiscoveredUrl
+from app.tools.discover import (
+    DiscoverArgs,
+    DiscoverDeps,
+    DiscoveryResult,
+    discover_urls as discover_urls_impl,
+)
 from app.tools.dynamic import (
     DynamicDeps,
     DynamicScrapeArgs,
@@ -54,8 +61,10 @@ Tool selection:
   MissionResult with status='error' and the matching error_code.
 
 On success: return MissionResult with status='ok', primary_url set
-to the final URL, markdown_excerpt set to the first ~500 chars of
-the markdown, and a one-paragraph summary in `summary`.
+to the final URL, and a one-paragraph summary in `summary`. Do NOT
+copy the page markdown into the response — the scrape tool's return
+value is already persisted by the runner; echoing it back blows the
+LLM's token budget on long pages and the tool call fails to close.
 
 Call exactly one tool successfully per mission. After ok, do not call
 more tools.
@@ -63,12 +72,20 @@ more tools.
 
 
 class MissionResult(BaseModel):
-    """Typed agent output. Validated by Pydantic AI on every run."""
+    """Typed agent output. Validated by Pydantic AI on every run.
+
+    `detected_protections` is intentionally `list[str] | None` even
+    though every consumer wants a list. The LLM (especially Groq's
+    Llama 3.3) frequently emits `null` for optional list fields
+    rather than `[]`, and Groq's strict tool-call validator rejects
+    `null` for `array`-typed schemas — burning the agent's retry
+    budget and 500-ing the whole mission. We accept null here and
+    normalize to `[]` for downstream consumers via the validator.
+    """
 
     status: Literal["ok", "error"]
     summary: str = Field(..., min_length=1, max_length=2000)
     primary_url: str | None = Field(default=None, max_length=2048)
-    markdown_excerpt: str | None = Field(default=None, max_length=600)
     error_code: (
         Literal[
             "site_not_supported",
@@ -79,7 +96,12 @@ class MissionResult(BaseModel):
         ]
         | None
     ) = None
-    detected_protections: list[str] = Field(default_factory=list)
+    detected_protections: list[str] | None = Field(default=None)
+
+    @field_validator("detected_protections", mode="after")
+    @classmethod
+    def _coerce_protections(cls, value: list[str] | None) -> list[str]:
+        return value if value is not None else []
 
 
 class MissionDeps(BaseModel):
@@ -169,3 +191,88 @@ def build_agent() -> Agent[MissionDeps, MissionResult]:
         return result
 
     return agent
+
+
+# --- description-mode discovery agent (Spec 12) -------------------------
+
+
+_DISCOVERY_SYSTEM_PROMPT = """\
+You are Autumn's URL-discovery agent. The user gives you a free-text
+description; you call `discover_urls` once with that query, then return
+the resulting URL list as a DiscoveryMissionResult.
+
+Rules:
+- Call `discover_urls` exactly once. Never twice.
+- If the tool returns reason=no_results, return DiscoveryMissionResult
+  with status='error', error_code='no_results'.
+- If the tool returns reason=upstream_error or rate_limited, return
+  DiscoveryMissionResult with status='error' and the matching error_code.
+- On success, return status='ok' and the urls list.
+
+Do not transform the URLs. Do not filter by score. The user reviews them.
+"""
+
+
+class DiscoveryDeps(BaseModel):
+    """Mission-scoped dependencies passed to `build_discovery_agent`."""
+
+    user_id: str
+    mission_id: UUID
+
+
+class DiscoveryMissionResult(BaseModel):
+    """Discovery agent's typed output. Validated by Pydantic AI on every run.
+
+    `urls` is `list[DiscoveredUrl] | None` to survive Groq's strict
+    tool-call validator when the model emits `null` for the list — see
+    the comment on `MissionResult.detected_protections` for the same
+    failure mode.
+    """
+
+    status: Literal["ok", "error"]
+    urls: list[DiscoveredUrl] | None = Field(default=None)
+    error_code: Literal["discovery_failed", "no_results", "rate_limited"] | None = None
+    error_message: str | None = None
+
+    @field_validator("urls", mode="after")
+    @classmethod
+    def _coerce_urls(cls, value: list[DiscoveredUrl] | None) -> list[DiscoveredUrl]:
+        return value if value is not None else []
+
+
+def build_discovery_agent() -> Agent[DiscoveryDeps, DiscoveryMissionResult]:
+    """Construct the URL-discovery agent.
+
+    Mirrors `build_agent`'s deferred-model pattern so the LLM-fallback
+    chain in `runner.py` can swap providers without rebuilding the
+    agent. Output is constrained by `DiscoveryMissionResult` so the
+    `prompt-engineer` agent's `output_type` invariant holds.
+    """
+    agent = Agent[DiscoveryDeps, DiscoveryMissionResult](
+        deps_type=DiscoveryDeps,
+        output_type=DiscoveryMissionResult,
+        system_prompt=_DISCOVERY_SYSTEM_PROMPT,
+        retries=2,
+        defer_model_check=True,
+    )
+
+    @agent.tool
+    async def discover_urls(ctx: RunContext[DiscoveryDeps], query: str) -> DiscoveryResult:
+        """Run the search provider for the given query."""
+        result: DiscoveryResult = await discover_urls_impl(
+            DiscoverDeps(user_id=ctx.deps.user_id, mission_id=ctx.deps.mission_id),
+            DiscoverArgs(query=query, max_results=20),
+        )
+        return result
+
+    return agent
+
+
+__all__ = [
+    "DiscoveryDeps",
+    "DiscoveryMissionResult",
+    "MissionDeps",
+    "MissionResult",
+    "build_agent",
+    "build_discovery_agent",
+]

@@ -38,6 +38,7 @@
   --color-foreground: var(--foreground);
   --color-background: var(--background);
   --color-state-success: var(--state-success);
+  --color-state-warn: var(--state-warn);
   --color-state-error: var(--state-error);
   --radius-sm: calc(var(--radius) * 0.6);
   --radius-md: calc(var(--radius) * 0.8);
@@ -72,6 +73,7 @@
   --input: #e5dfd3;
   --ring: #000000;
   --state-success: #4a7f3d;
+  --state-warn: #9e8c3a;
   --state-error: #a84a38;
 
   --sidebar: #f5f2ea;
@@ -105,6 +107,7 @@
   --input: #2a2620;
   --ring: #ffffff;
   --state-success: #6fa561;
+  --state-warn: #d4b856;
   --state-error: #cd6b5f;
 
   --sidebar: #13110f;
@@ -117,14 +120,54 @@
   --sidebar-ring: #ffffff;
 }
 
+/* Motion tokens — uniform timing across every transition.
+
+   `--motion-fast` (120ms) is for color / opacity / focus-ring micro-
+   interactions where the user shouldn't notice a "delay" but still
+   feels feedback. `--motion-smooth` (180ms) is for layout shifts
+   (sidebar collapse, lane expand, chevron rotate) where the eye
+   benefits from tracking the change. The `--ease-out-quart` curve
+   accelerates fast and decelerates slow, which reads as "snappy" — a
+   tighter feel than the default ease-in-out.
+
+   Tailwind's `transition-*` utilities default to a 150ms ease-in-out;
+   we override the curve here so every existing utility inherits the
+   project's motion language without per-class duration overrides. */
+:root {
+  --motion-fast: 120ms;
+  --motion-smooth: 180ms;
+  --ease-out-quart: cubic-bezier(0.25, 1, 0.5, 1);
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;
+    transition-timing-function: var(--ease-out-quart);
+    transition-duration: var(--motion-fast);
   }
   body {
     @apply bg-background text-foreground;
+    /* Smooth fade between light and dark theme so the toggle doesn't
+       feel like a hard cut. The colors flip via CSS variables, so a
+       transition on `background-color` and `color` is all it takes. */
+    transition:
+      background-color var(--motion-smooth) var(--ease-out-quart),
+      color var(--motion-smooth) var(--ease-out-quart);
   }
   html {
     @apply font-sans;
+  }
+
+  /* Honor `prefers-reduced-motion` — collapse every transition to
+     near-zero so users with vestibular sensitivities aren't surprised
+     by the sidebar / lane / sheet animations. The duration must be
+     non-zero so component logic that reads `transitionend` still
+     fires; 1ms is below the perceptual threshold but still emits. */
+  @media (prefers-reduced-motion: reduce) {
+    * {
+      transition-duration: 1ms !important;
+      animation-duration: 1ms !important;
+      animation-iteration-count: 1 !important;
+    }
   }
 }

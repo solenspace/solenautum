@@ -1,7 +1,9 @@
 "use client";
 
+import Link from "next/link";
+import { usePathname } from "next/navigation";
+
 import type { MissionRow as MissionRowData, MissionStatus } from "@/entities/mission/types";
-import { useMissionStore } from "@/features/run-mission";
 import { cn } from "@/shared/utils/cn";
 
 /** Status → dot color, mapped to project tokens (see `globals.css`). */
@@ -31,13 +33,36 @@ function _relativeTime(iso: string): string {
   return `${days}d`;
 }
 
+/**
+ * Cost cell content. We only render a value when we actually have one
+ * (`cost_cents > 0`); the previous behavior of rendering `?` for
+ * terminal-zero rows put a noisy sentinel on every free-tier mission
+ * and obscured the `$X.XXX` it was meant to highlight. Pre-terminal
+ * rows still render empty (cost only lands at the `done` event).
+ */
+function _formatCost(mission: MissionRowData): string {
+  if (mission.cost_cents > 0) {
+    return `$${(mission.cost_cents / 100).toFixed(3)}`;
+  }
+  return "";
+}
+
 export function MissionRow({ mission }: { mission: MissionRowData }) {
-  const open = useMissionStore((s) => s.openMission);
+  const pathname = usePathname();
+  const isActive = pathname === `/missions/${mission.id}`;
+  const cost = _formatCost(mission);
   return (
-    <button
-      type="button"
-      onClick={() => open(mission.id)}
-      className="group flex h-8 w-full items-center gap-2 rounded-md px-3 text-left transition-colors hover:bg-accent/40 data-[state=open]:bg-accent/40"
+    <Link
+      href={`/missions/${mission.id}`}
+      aria-current={isActive ? "page" : undefined}
+      className={cn(
+        // `transition-all` is intentional — the active row also picks
+        // up a leading accent border via the `border-l-2` modifier
+        // below, and the border + bg should fade in together rather
+        // than at separate clocks.
+        "group flex h-8 w-full items-center gap-2 rounded-md border-l-2 border-transparent px-3 text-left transition-all hover:bg-accent/40",
+        isActive && "border-l-primary/70 bg-accent/40",
+      )}
     >
       <span aria-hidden className={cn("h-1.5 w-1.5 rounded-full", _DOT_COLOR[mission.status])} />
       <span className="font-mono text-[11px] text-muted-foreground tabular-nums">
@@ -46,9 +71,12 @@ export function MissionRow({ mission }: { mission: MissionRowData }) {
       <span className="flex-1 truncate font-mono text-[13px] text-foreground">
         {mission.prompt}
       </span>
+      {cost ? (
+        <span className="font-mono text-[11px] text-muted-foreground/70 tabular-nums">{cost}</span>
+      ) : null}
       <span className="font-mono text-[11px] text-muted-foreground/70 tabular-nums">
         {_relativeTime(mission.created_at)}
       </span>
-    </button>
+    </Link>
   );
 }

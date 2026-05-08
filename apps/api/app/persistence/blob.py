@@ -32,6 +32,10 @@ class BlobStore(ABC):
     async def signed_url(self, key: str, *, expires_in_seconds: int = 3600) -> str:
         """Return a time-limited URL to fetch the object."""
 
+    @abstractmethod
+    async def health_check(self) -> None:
+        """Raise if the backend is not reachable. Called from `/health/ready`."""
+
 
 def _key(user_id: str, mission_id: UUID, task_id: UUID) -> str:
     return f"{user_id}/{mission_id}/{task_id}.html.gz"
@@ -90,6 +94,13 @@ class R2BlobStore(BlobStore):
             ExpiresIn=expires_in_seconds,
         )
 
+    async def health_check(self) -> None:
+        # boto3 is sync; offload to a thread so the readiness probe does not
+        # block the event loop.
+        import asyncio
+
+        await asyncio.to_thread(self._client.head_bucket, Bucket=self._bucket)
+
 
 class LocalFsBlobStore(BlobStore):
     """Dev / test backend. Writes under `apps/api/data/snapshots/` by default.
@@ -117,6 +128,10 @@ class LocalFsBlobStore(BlobStore):
     async def signed_url(self, key: str, *, expires_in_seconds: int = 3600) -> str:  # noqa: ARG002
         # Dev-only: a `file://` URL is not actually signed; never used in prod.
         return f"file://{(self._root / key).resolve()}"
+
+    async def health_check(self) -> None:
+        if not self._root.exists():
+            raise RuntimeError(f"local snapshot root missing: {self._root}")
 
 
 @lru_cache(maxsize=1)
